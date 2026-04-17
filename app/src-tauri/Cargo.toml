@@ -1,0 +1,29 @@
+[package]
+name = "cccplayer-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "cccplayer"
+path = "src/main.rs"
+
+[features]
+# Default is "library" style so `cargo check` works without pulling Tauri
+# native deps; `tauri` feature enables the full desktop binary.
+default = []
+tauri = ["dep:tauri", "dep:tauri-build"]
+
+[dependencies]
+cccplayer-core = { path = "../../crates/core" }
+cccplayer-harness = { path = "../../crates/harness" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+tauri = { version = "2", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }

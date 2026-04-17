@@ -1,0 +1,19 @@
+[package]
+name = "cccplayer-fake-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "cccplayer-fake-claude"
+path = "src/bin/fake_claude.rs"
+
+[[bin]]
+name = "cccplayer-fake-codex"
+path = "src/bin/fake_codex.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+regex.workspace = true

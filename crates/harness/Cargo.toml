@@ -1,0 +1,27 @@
+[package]
+name = "cccplayer-harness"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cccplayer-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+regex.workspace = true
+chrono.workspace = true
+futures.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true }
+
+# Ensure the fake CLI binaries are built before the integration tests run.
+# Cargo automatically builds test-bin/dev deps but artifact deps need this
+# explicit declaration to guarantee availability.
+[target.'cfg(all())'.dev-dependencies]
+cccplayer-fake-cli = { path = "../fake-cli" }
