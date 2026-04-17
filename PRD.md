@@ -34,6 +34,21 @@ Claude Code 负责设计与实现，Codex 负责评审，两者通过一组共�
 
 不满足时，应用以"前置检查"页面引导用户逐项解决，而非在运行中失败。
 
+### 2.1 工作目录的四种起始形态
+
+CCCPlayer 必须优雅处理工作目录的所有合理起始状态。**不假设空目录**。
+
+| 起始形态 | 处理 |
+| --- | --- |
+| a. 空目录 | 新建 Session：从零开始 PLANNING → IMPLEMENTING。 |
+| b. 已有用户代码，无 CCCPlayer 痕迹 | 新建 Session：PLANNING 的第一步是**现状盘点**（见 §10、§17.1）——先读一遍工作树，再写 PRD.md 的 "Current state" 节，PLANNING 之后的实现把现有代码当作**已完成的增量**。 |
+| c. 已有本应用 Session（`.cccplayer/` 存在）且 `GOAL.md` 与用户这次输入一致 | 直接恢复旧 Session（见 §7 决策树）。 |
+| d. 已有本应用 Session 但 `GOAL.md` 与这次输入不一致 | 弹窗询问：**继续旧目标** / **基于现状换新目标（归档旧 Session）** / **取消**。不静默覆盖。 |
+
+形态 b 是实战中最常见的情形——用户可能在别的工具里写了一半、或是一个真实的现有
+项目。CCCPlayer 的 PLANNING 阶段必须把"现有代码"当成不可忽视的约束与资产，而不
+是推倒重来。
+
 ## 3. 用户故事
 
 - **US-1 一键启动**：我输入"做一个能在本地跑的 Markdown TODO CLI，用 Rust 写"，
@@ -44,6 +59,10 @@ Claude Code 负责设计与实现，Codex 负责评审，两者通过一组共�
   改两行代码再继续。暂停 → 编辑 → 继续，循环从当前工作树重新进入评审。
 - **US-4 终止**：我发现目标定偏了，点"停止"。再次"开始"时，应用询问是继续旧目标、
   开新会话，还是基于旧工作树换新目标。
+- **US-5 基于现有代码**：我把一个已经写了一半的 Rust 项目的目录选给 CCCPlayer，
+  输入目标"让它支持从 CSV 导入并加集成测试"，点开始。CCCPlayer 应先盘点现状（不
+  重写已有部分），把 PRD.md 写成"从当前状态到目标"的增量计划，然后在现有代码上
+  迭代，而不是生成一个和现有目录无关的全新项目。
 
 ## 4. 核心概念与术语
 
@@ -208,13 +227,19 @@ on_click_start(session):
 .cccplayer/
 ├── session.json          # 状态机、Round 计数、时间戳（Goal 不在这里，见下）
 ├── events.log            # 追加式事件流（事件流 UI 的数据源）
+├── usage.json            # 本 Session 累计 token / 成本（见 §16.7）
 ├── transcripts/
 │   ├── round-01-impl.txt
 │   ├── round-01-review.txt
 │   └── …
 └── snapshots/
-    └── round-01.tar.zst  # 每 Round 开始前对工作树打包（排除 .cccplayer 自身）
+    ├── round-00.tar.zst  # Session 刚创建时的"原始状态"快照，永不删除
+    ├── round-01.tar.zst  # 每 Round 开始前对工作树打包（排除 .cccplayer 自身）
+    └── …
 ```
+
+**`round-00` 快照是用户原始代码的保险丝**：无论后续 agent 改了多少，用户随时可以
+"回到我最初给你的那份代码"，零风险地试。
 
 **不动用户的 git**：工作目录被视为一个普通本地文件夹。
 - 如果用户的目录恰好是 git 仓库，CCCPlayer 不调用 `git commit` / `git stash`，
@@ -283,14 +308,17 @@ Verdict 段格式（由 prompt 约束，解析器宽容）：
 
 ## 10. 文档规范
 
+- `GOAL.md`：由应用在创建 Session 时写入，之后所有 agent 只读（见 §9.3）。
 - `PRD.md`：由 Claude Code 全权维护。结构要求（由 prompt 约束）：
-  `Goal → Scope → Non-goals → Design → Milestones → Open Questions`。
+  `Goal → Current state → Scope → Non-goals → Design → Milestones → Open Questions`。
+  - **Current state 节**：PLANNING 阶段 Claude Code 先扫描工作目录，产出对现有
+    代码的盘点（技术栈、入口、关键模块、已实现功能、明显缺口）。若目录是空的，
+    写 "empty workspace" 一行即可。Milestones 必须以这份盘点为起点定义增量。
 - `codex_review_v{n}.md`：
   - 由 Codex 创建，单调递增，**不允许删除旧版本**。
   - Claude Code 在 `REFINING` 阶段追加 `## Claude Code 回应` 段，说明每条
     blocking 项的处理（接受 / 部分接受 / 拒绝+理由）。
   - 文件末尾必须有 `## Verdict` 段。
-- 两份文档都进入 git 历史，方便审阅演进过程。
 
 ## 11. 停止条件
 
@@ -431,6 +459,18 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
   - Codex reasoning level：默认 `high`。
 - 通过 CLI flag 传入，不劫持 CLI 自身的配置文件。
 
+### 16.7 用量显示（M1 范围）
+
+M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-json 事件里累加。
+
+- 底部状态条挂一个小组件："本 Session · <claude_in+out> tokens · <codex_in+out> tokens"。
+- 数据源头：两个 harness 订阅 CLI 自己回报的 usage 事件；写入 `.cccplayer/usage.json`
+  落盘，Session 恢复后继续累加。
+- **M1 不做** 5 小时滚动额度 / 周度余额显示。这两项依赖 CLI 是否提供非交互查询
+  命令，等真机探测稳定后再作为增量（M3+）加入。找不到稳定接口就老实标"不可用"，
+  不伪造数字。
+- 用量数字**不**参与任何停止条件，纯展示。
+
 ## 17. Prompt 模板（待你确认）
 
 下面五个 prompt 作为 M1 起点；全部以英文撰写（两个 CLI 对英文指令最稳），文件
@@ -443,22 +483,38 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
 You are working in {workdir}. First read GOAL.md — that is the user's
 immutable goal for this session; never modify it.
 
+IMPORTANT: the working directory may already contain the user's existing
+code — possibly a real in-progress project. Before writing any design,
+SURVEY the current state:
+  - List top-level files and directories.
+  - Identify language, build system, entry points, and key modules.
+  - Note what is already implemented vs. what the goal still requires.
+  - Never assume an empty workspace; never plan to scrap existing code
+    unless GOAL.md explicitly requires it.
+
 Task for this turn: produce or update PRD.md so it fully specifies how to
-deliver the goal. PRD.md is the single design document; later turns will
-implement code against it.
+reach GOAL.md FROM THE CURRENT STATE. PRD.md is the single design document;
+later turns will implement code against it.
 
 Required top-level headings (in order):
 1. Goal            — verbatim restatement of GOAL.md, one sentence.
-2. Scope           — what is in.
-3. Non-goals       — what is explicitly out.
-4. Design          — architecture, key modules, file layout, data model,
-                     external dependencies.
-5. Milestones      — ordered checklist of shippable increments.
-6. Open Questions  — anything you could not decide; empty list is fine.
+2. Current state   — your survey findings. Write "empty workspace" if the
+                     directory is empty; otherwise 3–10 bullets covering
+                     stack, entry points, what is already done, and any
+                     obvious gaps or risks inherited from existing code.
+3. Scope           — what is in, phrased as *delta* over Current state.
+4. Non-goals       — what is explicitly out.
+5. Design          — architecture, key modules, file layout, data model,
+                     external dependencies. Where existing code already
+                     fits the design, say "reuse as-is" rather than
+                     redesigning.
+6. Milestones      — ordered checklist of shippable increments, starting
+                     from Current state and ending at GOAL.md.
+7. Open Questions  — anything you could not decide; empty list is fine.
 
-If PRD.md already exists, revise it in place; preserve prior decisions unless
-newly contradicted. If codex_review_v*.md files exist, read the highest-
-numbered one and fold any PRD-level feedback into this revision.
+If PRD.md already exists, revise it in place; preserve prior decisions
+unless newly contradicted. If codex_review_v*.md files exist, read the
+highest-numbered one and fold any PRD-level feedback into this revision.
 
 Write PRD.md atomically (temp file + rename). Do not modify any other file
 in this turn.
@@ -532,7 +588,10 @@ When done, print to stdout:
 ```text
 You are working in {workdir} as an independent reviewer. Read:
   1. GOAL.md — the immutable user goal.
-  2. PRD.md — the current design.
+  2. PRD.md — the current design. Note its "Current state" section: some
+     code in the working tree was authored by the user before this session
+     started. Review it for goal-fit, but do not flag pre-existing style
+     issues as blocking unless they actively prevent the goal.
   3. The working tree source files.
   4. All prior codex_review_v*.md files — do not repeat points already
      marked "accepted" in their "## Claude Code 回应" sections unless they
@@ -630,6 +689,8 @@ next_state rules:
 | 11 | 原子写与回滚 | prompt 强制 tmp+rename，turn 取消回滚到 Round 起始快照 | §16.5 |
 | 12 | 模型 | 默认 Claude Opus 4.7 + Codex reasoning=high | §16.6 |
 | 13 | 进度显示 | 状态条 + 事件时间线 + 原始日志抽屉 | §6.1 |
+| 14 | 用量显示 | M1 只显示本 Session 累计 token；滚动 / 周度余额延后，待 CLI 能力探测后再做 | §16.7 |
+| 15 | 非空工作目录 | 支持既有代码：PLANNING 先盘点、PRD 含 "Current state"、`round-00` 保留原始快照 | §2.1、§10、§17.1 |
 
 ---
 
