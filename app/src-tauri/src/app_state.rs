@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cccplayer_core::events::Event;
+use cccplayer_core::events::{Event, RawLogLine};
 use cccplayer_core::session::Session;
 use cccplayer_harness::orchestrator::CancelHandle;
 use cccplayer_harness::{Orchestrator, OrchestratorConfig};
@@ -72,10 +72,20 @@ impl AppState {
         orch.ensure_initialized(goal.lines().next().unwrap_or(""))?;
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
-        let app_for_forward = app.clone();
+        let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<RawLogLine>();
+        orch.set_raw_sink(raw_tx);
+
+        let app_for_events = app.clone();
         tokio::spawn(async move {
             while let Some(ev) = events_rx.recv().await {
-                let _ = app_for_forward.emit("cccplayer://event", &ev);
+                let _ = app_for_events.emit("cccplayer://event", &ev);
+            }
+        });
+
+        let app_for_raw = app.clone();
+        tokio::spawn(async move {
+            while let Some(line) = raw_rx.recv().await {
+                let _ = app_for_raw.emit("cccplayer://raw", &line);
             }
         });
 

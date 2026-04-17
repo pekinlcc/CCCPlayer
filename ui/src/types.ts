@@ -60,3 +60,14 @@ export interface ClassifyResp {
   verdict: SafetyVerdict
   gitignore_appended: boolean
 }
+
+export type RawStream = 'stdout' | 'stderr'
+
+export interface RawLogLine {
+  at: string
+  round: number
+  agent: Agent
+  phase: Phase
+  stream: RawStream
+  line: string
+}

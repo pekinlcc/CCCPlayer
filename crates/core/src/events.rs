@@ -94,6 +94,27 @@ pub enum Agent {
     Codex,
 }
 
+/// A single raw stdout/stderr line produced by a spawned CLI, annotated with
+/// the agent/phase/round it came from. Emitted to the UI over a separate
+/// event channel from the structured [`Event`] stream so users can diagnose
+/// CLIs that crash before producing structured output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawLogLine {
+    pub at: DateTime<Utc>,
+    pub round: u32,
+    pub agent: Agent,
+    pub phase: Phase,
+    pub stream: RawStream,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RawStream {
+    Stdout,
+    Stderr,
+}
+
 /// Per §16.8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

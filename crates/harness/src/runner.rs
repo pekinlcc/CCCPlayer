@@ -51,17 +51,70 @@ pub enum StreamEvent {
     },
 }
 
-/// Look for a stream-json `usage` object on a single line and extract
-/// input/output token counts. Both the real CLIs and our fakes emit
-/// `{"type":"usage","input_tokens":…,"output_tokens":…}`.
+/// Look for token usage on a single stream-json line. Handles two shapes:
+///
+/// 1. Flat (fake CLIs, legacy):
+///    `{"type":"usage","input_tokens":N,"output_tokens":M}`
+/// 2. Nested (real Claude Code `--output-format stream-json --verbose`):
+///    `{"type":"assistant","message":{…,"usage":{"input_tokens":N,
+///     "output_tokens":M,"cache_creation_input_tokens":…,
+///     "cache_read_input_tokens":…}}}`
+///
+/// Each `assistant` message represents one API call; callers should sum
+/// deltas across the turn. `result` messages (session totals) are
+/// deliberately ignored to avoid double counting.
 pub fn parse_usage_line(line: &str) -> Option<(u64, u64)> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    if v.get("type").and_then(|x| x.as_str()) != Some("usage") {
+    let ty = v.get("type").and_then(|x| x.as_str())?;
+    let usage = match ty {
+        "usage" => &v,
+        "assistant" => v.get("message")?.get("usage")?,
+        _ => return None,
+    };
+    let i = usage.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+    let o = usage
+        .get("output_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    if i == 0 && o == 0 {
         return None;
     }
-    let i = v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-    let o = v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
     Some((i, o))
+}
+
+/// Codex `exec` writes a plain-text total near the end of the run:
+///
+/// ```text
+/// tokens used
+/// 160,317
+/// ```
+///
+/// Scan the combined stdout+stderr transcript for that pair and return the
+/// last occurrence (later runs overwrite earlier ones in the same stream).
+/// Returns `None` if no such pair is present.
+pub fn parse_codex_total_tokens(text: &str) -> Option<u64> {
+    let mut last: Option<u64> = None;
+    let mut expect_number = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if expect_number {
+            if line.is_empty() {
+                continue;
+            }
+            let digits: String = line.chars().filter(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                if let Ok(n) = digits.parse::<u64>() {
+                    last = Some(n);
+                }
+            }
+            expect_number = false;
+            continue;
+        }
+        if line == "tokens used" {
+            expect_number = true;
+        }
+    }
+    last
 }
 
 pub struct HarnessRunner;
@@ -225,6 +278,7 @@ impl HarnessRunner {
             watcher.is_stalled(),
             input.workdir.as_path(),
             input.phase,
+            input.agent,
         );
 
         Ok(TurnResult {
@@ -246,6 +300,7 @@ fn classify(
     stalled: bool,
     workdir: &Path,
     phase: Phase,
+    agent: Agent,
 ) -> TurnOutcome {
     // Order matters per §16.8: auth_failed > refused > stalled > crashed >
     // output_malformed > ok.
@@ -261,14 +316,14 @@ fn classify(
     if exit_code.map(|c| c != 0).unwrap_or(true) {
         return TurnOutcome::Crashed;
     }
-    if !output_well_formed(workdir, phase, stdout) {
+    if !output_well_formed(workdir, phase, stdout, agent) {
         return TurnOutcome::OutputMalformed;
     }
     TurnOutcome::Ok
 }
 
-fn output_well_formed(workdir: &Path, phase: Phase, stdout: &str) -> bool {
-    use crate::parsers::{parse_goal_check, parse_review, prd_is_well_formed};
+fn output_well_formed(workdir: &Path, phase: Phase, stdout: &str, agent: Agent) -> bool {
+    use crate::parsers::{extract_claude_text, parse_goal_check, parse_review, prd_is_well_formed};
     match phase {
         Phase::Planning => {
             let Ok(prd) = std::fs::read_to_string(workdir.join("PRD.md")) else {
@@ -279,6 +334,9 @@ fn output_well_formed(workdir: &Path, phase: Phase, stdout: &str) -> bool {
         Phase::Implementing => {
             // "At least one non-.cccplayer file was created/modified" is
             // approximated by checking the stdout summary line format.
+            // Works for plain-text fakes and real Claude stream-json alike
+            // ("files: …" appears literally in the envelope's "text" field).
+            let _ = agent;
             stdout.contains("files:")
         }
         Phase::Refining => {
@@ -301,7 +359,16 @@ fn output_well_formed(workdir: &Path, phase: Phase, stdout: &str) -> bool {
             };
             parse_review(&body).is_some()
         }
-        Phase::GoalCheck => parse_goal_check(stdout).is_some(),
+        Phase::GoalCheck => {
+            // Claude emits stream-json; goal-check JSON lives inside the
+            // model's text reply (assistant.content or result.result).
+            // Codex emits plain text, parse stdout directly.
+            let text = match agent {
+                Agent::Claude => extract_claude_text(stdout),
+                Agent::Codex => stdout.to_string(),
+            };
+            parse_goal_check(&text).is_some()
+        }
         Phase::Idle => true,
     }
 }
@@ -392,4 +459,44 @@ mod libc_stub {
     pub const SIGINT: i32 = 2;
     pub const SIGTERM: i32 = 15;
     pub const SIGKILL: i32 = 9;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_codex_total_tokens, parse_usage_line};
+
+    #[test]
+    fn parses_flat_usage_line() {
+        let line = r#"{"type":"usage","input_tokens":12,"output_tokens":34}"#;
+        assert_eq!(parse_usage_line(line), Some((12, 34)));
+    }
+
+    #[test]
+    fn parses_nested_assistant_usage() {
+        let line = r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-opus","content":[],"usage":{"input_tokens":5,"cache_creation_input_tokens":8533,"cache_read_input_tokens":11718,"output_tokens":77}}}"#;
+        assert_eq!(parse_usage_line(line), Some((5, 77)));
+    }
+
+    #[test]
+    fn skips_zero_usage() {
+        let line = r#"{"type":"assistant","message":{"usage":{"input_tokens":0,"output_tokens":0}}}"#;
+        assert_eq!(parse_usage_line(line), None);
+    }
+
+    #[test]
+    fn ignores_unrelated_types() {
+        assert_eq!(parse_usage_line(r#"{"type":"thinking"}"#), None);
+        assert_eq!(parse_usage_line(r#"{"type":"result","usage":{"input_tokens":999}}"#), None);
+    }
+
+    #[test]
+    fn codex_total_picks_last_pair() {
+        let text = "some output\ntokens used\n1,234\n...more...\ntokens used\n160,317\nthen trailing text\n";
+        assert_eq!(parse_codex_total_tokens(text), Some(160_317));
+    }
+
+    #[test]
+    fn codex_total_returns_none_when_missing() {
+        assert_eq!(parse_codex_total_tokens("no tokens here\n"), None);
+    }
 }

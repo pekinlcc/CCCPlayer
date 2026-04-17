@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>CCCPlayer — cyberpunk mockup</title>
+<style>
+  :root {
+    --bg: #07070c;
+    --panel: #0f0f18;
+    --panel2: #14141f;
+    --chrome: #1a1a26;
+    --chrome-hi: #2a2a3a;
+    --chrome-lo: #050509;
+    --cyan: #00e5ff;
+    --magenta: #ff2fd6;
+    --lime: #baff29;
+    --amber: #ffb347;
+    --danger: #ff355a;
+    --dim: #6c6c86;
+    --ink: #d6d6ee;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background:
+      radial-gradient(1200px 700px at 20% -10%, rgba(255,47,214,0.08), transparent 60%),
+      radial-gradient(1000px 600px at 100% 110%, rgba(0,229,255,0.08), transparent 60%),
+      var(--bg);
+    color: var(--ink);
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    font-size: 13px;
+    min-height: 100vh;
+  }
+  .page {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+    padding: 40px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+  .caption {
+    font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase;
+    color: var(--dim); margin-bottom: 10px;
+  }
+  .caption b { color: var(--cyan); font-weight: 600; }
+
+  /* ------- Winamp-style outer shell ------- */
+  .shell {
+    background: linear-gradient(180deg, #1e1e2a 0%, #0a0a12 100%);
+    border: 1px solid #30304a;
+    border-top-color: #4a4a66;
+    border-left-color: #3a3a52;
+    border-radius: 6px;
+    padding: 0;
+    box-shadow:
+      0 0 0 1px rgba(0,0,0,0.6) inset,
+      0 20px 60px rgba(0,0,0,0.7),
+      0 0 80px rgba(255,47,214,0.07);
+    overflow: hidden;
+  }
+  .titlebar {
+    height: 22px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 10px;
+    background: linear-gradient(180deg, #3a3a52, #1a1a26);
+    border-bottom: 1px solid #05050a;
+    font-size: 10.5px; letter-spacing: 1.4px; text-transform: uppercase;
+    color: #a8a8c8;
+  }
+  .titlebar .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .titlebar .dot.r { background: #ff5e5e; box-shadow: 0 0 6px #ff5e5e; }
+  .titlebar .dot.y { background: #ffd25e; box-shadow: 0 0 6px #ffd25e; }
+  .titlebar .dot.g { background: #5eff8c; box-shadow: 0 0 6px #5eff8c; }
+  .titlebar .brand {
+    margin-left: 4px;
+    color: #e7e7ff; font-weight: 700; letter-spacing: 2px;
+    text-shadow: 0 0 6px rgba(0,229,255,0.4);
+  }
+  .titlebar .spacer { flex: 1; }
+  .titlebar .sys { opacity: 0.5; font-size: 10px; }
+
+  /* ------- Main display (Winamp LCD area) ------- */
+  .display {
+    position: relative;
+    background:
+      repeating-linear-gradient(
+        0deg,
+        rgba(255,255,255,0.02) 0 1px,
+        transparent 1px 3px
+      ),
+      linear-gradient(180deg, #07070d, #02020a);
+    border: 1px solid #05050a;
+    border-top-color: #000;
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.04),
+      inset 0 0 30px rgba(0, 229, 255, 0.05);
+    margin: 12px;
+    border-radius: 4px;
+    padding: 14px 16px 12px;
+  }
+  .display::before {
+    /* scanline */
+    content: "";
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(
+      180deg,
+      rgba(0,229,255,0.03) 0 2px,
+      transparent 2px 4px
+    );
+    pointer-events: none;
+    border-radius: inherit;
+  }
+
+  .row { display: flex; align-items: center; gap: 14px; }
+  .label { color: var(--dim); font-size: 10.5px; letter-spacing: 1.4px; text-transform: uppercase; min-width: 58px; }
+  .value { color: var(--cyan); text-shadow: 0 0 6px rgba(0,229,255,0.55); font-weight: 600; }
+  .value.magenta { color: var(--magenta); text-shadow: 0 0 8px rgba(255,47,214,0.5); }
+  .value.lime    { color: var(--lime);    text-shadow: 0 0 6px rgba(186,255,41,0.5); }
+  .value.amber   { color: var(--amber);   text-shadow: 0 0 6px rgba(255,179,71,0.5); }
+  .value.danger  { color: var(--danger);  text-shadow: 0 0 6px rgba(255,53,90,0.55); }
+
+  .pathfield {
+    flex: 1;
+    border: 1px solid #1a1a2e;
+    background: #030308;
+    padding: 6px 8px;
+    color: var(--ink);
+    font-size: 12px;
+    box-shadow: inset 0 0 8px rgba(0,229,255,0.06);
+  }
+  .pathfield.placeholder { color: var(--dim); }
+  .minibtn {
+    font-family: inherit; font-size: 10.5px; letter-spacing: 1.4px; text-transform: uppercase;
+    padding: 6px 10px;
+    background: linear-gradient(180deg, #262637, #121220);
+    border: 1px solid #0a0a12;
+    border-top-color: #3a3a52;
+    color: #b8b8d8; cursor: pointer;
+    border-radius: 3px;
+  }
+  .minibtn:hover { border-color: var(--cyan); color: var(--cyan); }
+
+  .goal-box {
+    margin-top: 12px;
+    border: 1px solid #1a1a2e;
+    background: #030308;
+    height: 90px;
+    padding: 8px 10px;
+    color: var(--lime);
+    text-shadow: 0 0 4px rgba(186,255,41,0.35);
+    box-shadow: inset 0 0 12px rgba(186,255,41,0.04);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .goal-box .prompt { color: var(--magenta); margin-right: 6px; text-shadow: 0 0 6px rgba(255,47,214,0.6); }
+  .goal-box .caret { display: inline-block; width: 8px; background: var(--lime); animation: blink 1.05s infinite; margin-left: 1px; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ------- Phase LED bar ------- */
+  .phase-row {
+    display: flex; align-items: center; gap: 10px; margin-top: 12px;
+    padding: 6px 8px;
+    background: #02020a;
+    border: 1px solid #0a0a12;
+    border-radius: 3px;
+  }
+  .phase-segs { display: flex; gap: 3px; }
+  .seg {
+    width: 22px; height: 10px;
+    background: #0a0a14;
+    border: 1px solid #000;
+    box-shadow: inset 0 0 4px rgba(0,0,0,0.6);
+  }
+  .seg.on { background: var(--cyan); box-shadow: 0 0 8px var(--cyan), inset 0 0 2px #fff; }
+  .seg.on.mag { background: var(--magenta); box-shadow: 0 0 8px var(--magenta); }
+  .seg.on.lime { background: var(--lime); box-shadow: 0 0 8px var(--lime); }
+
+  /* ------- Transport bar ------- */
+  .transport {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 14px;
+    background: linear-gradient(180deg, #181823, #0c0c14);
+    border-top: 1px solid #000;
+  }
+  .tbtn {
+    width: 42px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+    background: linear-gradient(180deg, #2a2a3a, #101018);
+    border: 1px solid #000;
+    border-top-color: #3a3a52;
+    border-radius: 3px;
+    cursor: pointer;
+    color: var(--cyan);
+    position: relative;
+  }
+  .tbtn:hover { box-shadow: 0 0 12px rgba(0,229,255,0.4); border-color: var(--cyan); }
+  .tbtn.play  { color: var(--lime); }
+  .tbtn.stop  { color: var(--danger); }
+  .tbtn.play:hover { box-shadow: 0 0 12px rgba(186,255,41,0.55); border-color: var(--lime); }
+  .tbtn.stop:hover { box-shadow: 0 0 12px rgba(255,53,90,0.55); border-color: var(--danger); }
+  .tbtn.big { width: 56px; height: 38px; }
+  .tbtn svg { display: block; }
+  .transport .sep { width: 1px; height: 26px; background: #000; margin: 0 6px; box-shadow: 1px 0 0 #2a2a3a; }
+  .transport .pill {
+    font-size: 10px; letter-spacing: 1.4px; text-transform: uppercase;
+    padding: 4px 8px; border: 1px solid #2a2a3a; color: var(--dim);
+    border-radius: 2px;
+  }
+  .transport .spacer { flex: 1; }
+
+  /* Channel meters */
+  .meters { display: flex; align-items: center; gap: 12px; }
+  .meter {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 10px; letter-spacing: 1px; color: var(--dim);
+  }
+  .bars { display: flex; gap: 2px; }
+  .b {
+    width: 4px; background: #0a0a14; border: 1px solid #000;
+  }
+  .b.h1 { height: 6px; }
+  .b.h2 { height: 9px; }
+  .b.h3 { height: 12px; }
+  .b.h4 { height: 15px; }
+  .b.on.c1 { background: var(--lime); box-shadow: 0 0 4px var(--lime); }
+  .b.on.c2 { background: var(--cyan); box-shadow: 0 0 4px var(--cyan); }
+  .b.on.c3 { background: var(--magenta); box-shadow: 0 0 4px var(--magenta); }
+  .b.on.c4 { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
+
+  /* ------- Progress panel (running state) ------- */
+  .progress-panel {
+    border-top: 1px solid #000;
+    background: linear-gradient(180deg, #0c0c14, #05050a);
+    padding: 14px 18px 18px;
+  }
+  .progress-head {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 10.5px; letter-spacing: 1.6px; text-transform: uppercase;
+    color: var(--magenta);
+    text-shadow: 0 0 6px rgba(255,47,214,0.5);
+    margin-bottom: 12px;
+  }
+  .kv-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 22px;
+    margin-bottom: 14px;
+  }
+  .kv { display: flex; flex-direction: column; gap: 4px; }
+  .kv .label { font-size: 9.5px; }
+  .kv .big {
+    font-size: 17px; letter-spacing: 2px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .split {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  }
+  .pane {
+    background: #02020a;
+    border: 1px solid #1a1a2e;
+    border-radius: 3px;
+    box-shadow: inset 0 0 14px rgba(0,229,255,0.04);
+    overflow: hidden;
+  }
+  .pane h4 {
+    margin: 0; padding: 7px 10px;
+    font-size: 10px; letter-spacing: 1.6px; text-transform: uppercase;
+    color: var(--dim);
+    border-bottom: 1px solid #0a0a12;
+    background: #0a0a14;
+  }
+  .timeline-list {
+    padding: 6px 10px 10px;
+    font-size: 11.5px; line-height: 1.5;
+    max-height: 180px; overflow: auto;
+  }
+  .ev { display: grid; grid-template-columns: 60px 130px 1fr; gap: 8px; padding: 2px 0; }
+  .ev .t  { color: var(--dim); }
+  .ev .k  { color: var(--cyan); }
+  .ev .d  { color: var(--ink); opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ev.fail .k, .ev.fail .d { color: var(--danger); text-shadow: 0 0 6px rgba(255,53,90,0.4); }
+  .ev.ok   .k { color: var(--lime); }
+  .ev.note .k { color: var(--amber); }
+
+  .raw-pre {
+    margin: 0; padding: 8px 10px;
+    font-size: 10.5px; line-height: 1.45;
+    color: var(--lime);
+    text-shadow: 0 0 4px rgba(186,255,41,0.3);
+    max-height: 180px; overflow: auto;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .raw-pre .dim { color: var(--dim); text-shadow: none; }
+  .raw-pre .mag { color: var(--magenta); text-shadow: 0 0 4px rgba(255,47,214,0.5); }
+  .raw-pre .cyan { color: var(--cyan); text-shadow: 0 0 4px rgba(0,229,255,0.4); }
+
+  /* ------- Footer strip ------- */
+  .foot {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    font-size: 10px; letter-spacing: 1.4px; text-transform: uppercase;
+    color: var(--dim);
+    border-top: 1px solid #000;
+    background: #05050a;
+  }
+  .foot code { color: var(--cyan); text-shadow: 0 0 4px rgba(0,229,255,0.4); }
+
+  /* Tiny labels above mockups */
+  h1 { font-size: 20px; letter-spacing: 3px; text-transform: uppercase;
+       color: var(--ink); text-shadow: 0 0 10px rgba(0,229,255,0.3);
+       margin: 0 0 6px; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 20px; }
+</style>
+</head>
+<body>
+<div style="padding:40px 40px 0;">
+  <h1>CCCPlayer · cyberpunk mockup</h1>
+  <div class="sub">Winamp-style chrome shell · neon accents · triangle PLAY button · progress panel appears below on PLAY.</div>
+</div>
+<div class="page">
+
+  <!-- ============================================================= -->
+  <!-- IDLE STATE                                                    -->
+  <!-- ============================================================= -->
+  <div>
+    <div class="caption"><b>01</b> · idle (before play)</div>
+    <div class="shell">
+      <div class="titlebar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="brand">CCCPlayer</span>
+        <span style="opacity:.55;letter-spacing:1px;">CLAUDE·CODE × CODEX</span>
+        <span class="spacer"></span>
+        <span class="sys">◇ NO SESSION</span>
+      </div>
+
+      <div class="display">
+        <div class="row">
+          <span class="label">Track</span>
+          <span class="value magenta" style="letter-spacing:3px;">— · — · —</span>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <span class="label">Folder</span>
+          <span class="pathfield placeholder">~/Desktop/my-project</span>
+          <button class="minibtn">Browse…</button>
+        </div>
+        <div class="goal-box">
+          <div><span class="prompt">&gt;</span>Add CSV import to the existing app and write integration tests.<span class="caret">&nbsp;</span></div>
+        </div>
+      </div>
+
+      <!-- Transport -->
+      <div class="transport">
+        <button class="tbtn play big" title="PLAY">
+          <svg width="16" height="16" viewBox="0 0 16 16"><polygon points="3,2 14,8 3,14" fill="currentColor"/></svg>
+        </button>
+        <button class="tbtn" title="PAUSE" style="opacity:.35">
+          <svg width="16" height="16" viewBox="0 0 16 16">
+            <rect x="3"  y="2" width="4" height="12" fill="currentColor"/>
+            <rect x="9"  y="2" width="4" height="12" fill="currentColor"/>
+          </svg>
+        </button>
+        <button class="tbtn stop" title="STOP" style="opacity:.35">
+          <svg width="16" height="16" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" fill="currentColor"/></svg>
+        </button>
+        <span class="sep"></span>
+        <span class="pill">Preflight · OK</span>
+        <span class="pill">AUTO-APPROVE ✓</span>
+        <span class="spacer"></span>
+        <div class="meters">
+          <div class="meter"><span>CLAUDE</span>
+            <div class="bars">
+              <span class="b h1"></span><span class="b h2"></span>
+              <span class="b h3"></span><span class="b h4"></span>
+            </div>
+          </div>
+          <div class="meter"><span>CODEX</span>
+            <div class="bars">
+              <span class="b h1"></span><span class="b h2"></span>
+              <span class="b h3"></span><span class="b h4"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <span>WORKDIR</span> <code>~/Desktop/my-project</code>
+        <span class="spacer"></span>
+        <span>v0.1.0</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================= -->
+  <!-- RUNNING STATE                                                 -->
+  <!-- ============================================================= -->
+  <div>
+    <div class="caption"><b>02</b> · running (progress panel expanded)</div>
+    <div class="shell">
+      <div class="titlebar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="brand">CCCPlayer</span>
+        <span style="opacity:.55;letter-spacing:1px;">CLAUDE·CODE × CODEX</span>
+        <span class="spacer"></span>
+        <span class="sys" style="color:var(--lime); text-shadow:0 0 6px var(--lime)">▶ RUNNING</span>
+      </div>
+
+      <div class="display">
+        <div class="row">
+          <span class="label">Track</span>
+          <span class="value magenta">GOAL_v1 · CSV IMPORT</span>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <span class="label">Folder</span>
+          <span class="pathfield">/Users/bytedance/Desktop/my-project</span>
+        </div>
+        <div class="phase-row">
+          <span class="label" style="min-width:auto">Phase</span>
+          <span class="phase-segs">
+            <span class="seg on mag"></span>
+            <span class="seg on mag"></span>
+            <span class="seg on mag"></span>
+            <span class="seg on"></span>
+            <span class="seg on"></span>
+            <span class="seg"></span>
+            <span class="seg"></span>
+          </span>
+          <span class="value magenta" style="margin-left:6px;">IMPLEMENTING</span>
+          <span style="flex:1"></span>
+          <span class="label">Round</span>
+          <span class="value">03</span>
+        </div>
+      </div>
+
+      <div class="transport">
+        <button class="tbtn play big" title="PLAY" style="opacity:.35">
+          <svg width="16" height="16" viewBox="0 0 16 16"><polygon points="3,2 14,8 3,14" fill="currentColor"/></svg>
+        </button>
+        <button class="tbtn" title="PAUSE">
+          <svg width="16" height="16" viewBox="0 0 16 16">
+            <rect x="3" y="2" width="4" height="12" fill="currentColor"/>
+            <rect x="9" y="2" width="4" height="12" fill="currentColor"/>
+          </svg>
+        </button>
+        <button class="tbtn stop" title="STOP">
+          <svg width="16" height="16" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" fill="currentColor"/></svg>
+        </button>
+        <span class="sep"></span>
+        <span class="pill" style="color:var(--cyan);border-color:var(--cyan);">T+ 12:34</span>
+        <span class="pill" style="color:var(--amber);border-color:var(--amber);">3s AGO</span>
+        <span class="spacer"></span>
+        <div class="meters">
+          <div class="meter"><span>CLAUDE</span>
+            <div class="bars">
+              <span class="b h1 on c1"></span><span class="b h2 on c1"></span>
+              <span class="b h3 on c2"></span><span class="b h4 on c3"></span>
+            </div>
+          </div>
+          <div class="meter"><span>CODEX</span>
+            <div class="bars">
+              <span class="b h1 on c1"></span><span class="b h2 on c1"></span>
+              <span class="b h3"></span><span class="b h4"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Progress panel -->
+      <div class="progress-panel">
+        <div class="progress-head">
+          <span>▼ PROGRESS</span>
+          <span style="flex:1"></span>
+          <span style="color:var(--dim); letter-spacing:1.4px;">SESSION · 94034e08…</span>
+        </div>
+
+        <div class="kv-grid">
+          <div class="kv">
+            <span class="label">Elapsed</span>
+            <span class="big value">12:34</span>
+          </div>
+          <div class="kv">
+            <span class="label">Tokens</span>
+            <span class="big value lime">8,421 + 2,193</span>
+          </div>
+          <div class="kv">
+            <span class="label">Last activity</span>
+            <span class="big value amber">3s ago</span>
+          </div>
+          <div class="kv">
+            <span class="label">Round</span>
+            <span class="big value">03 / ∞</span>
+          </div>
+          <div class="kv">
+            <span class="label">Failures</span>
+            <span class="big value">0</span>
+          </div>
+          <div class="kv">
+            <span class="label">Cost</span>
+            <span class="big value magenta">$0.06</span>
+          </div>
+        </div>
+
+        <div class="split">
+          <div class="pane">
+            <h4>Timeline</h4>
+            <div class="timeline-list">
+              <div class="ev"><span class="t">13:37:27</span><span class="k">agent_started</span><span class="d">claude → PLANNING</span></div>
+              <div class="ev ok"><span class="t">13:39:20</span><span class="k">agent_finished</span><span class="d">claude PLANNING — ok (113s)</span></div>
+              <div class="ev"><span class="t">13:39:20</span><span class="k">state_changed</span><span class="d">Running/Implementing</span></div>
+              <div class="ev"><span class="t">13:39:20</span><span class="k">agent_started</span><span class="d">claude → IMPLEMENTING</span></div>
+              <div class="ev ok"><span class="t">13:44:25</span><span class="k">agent_finished</span><span class="d">claude IMPLEMENTING — ok (305s)</span></div>
+              <div class="ev"><span class="t">13:44:26</span><span class="k">agent_started</span><span class="d">codex → REVIEWING</span></div>
+              <div class="ev ok"><span class="t">13:48:38</span><span class="k">agent_finished</span><span class="d">codex REVIEWING — ok (252s)</span></div>
+              <div class="ev note"><span class="t">13:48:38</span><span class="k">review_written</span><span class="d">v1 — changes_requested (4)</span></div>
+              <div class="ev"><span class="t">13:48:38</span><span class="k">state_changed</span><span class="d">Running/Refining</span></div>
+              <div class="ev"><span class="t">13:49:00</span><span class="k">agent_started</span><span class="d">claude → REFINING</span></div>
+            </div>
+          </div>
+          <div class="pane">
+            <h4>Raw stream <span style="color:var(--dim); margin-left:6px;">· 1226 lines</span></h4>
+<pre class="raw-pre"><span class="dim">[13:48:34]</span> <span class="cyan">claude/stdout</span> {"type":"assistant","message":{
+  "content":[{"type":"text","text":"Writing Importer.swift…"}],
+  "usage":{"input_tokens":5,"cache_read_input_tokens":99440,
+  <span class="mag">"output_tokens":2116</span>}}}
+<span class="dim">[13:48:35]</span> <span class="cyan">claude/stdout</span> {"type":"tool_use","name":"Write","input":{
+  "file_path":"Sources/Importer.swift"}}
+<span class="dim">[13:48:36]</span> <span class="cyan">claude/stdout</span> {"type":"result","subtype":"success",
+  "duration_ms":47431,"num_turns":7,
+  "result":"```json\n{\n  \"done\": false,\n  ...
+<span class="dim">[13:48:38]</span> <span class="cyan">claude/stdout</span> <span class="mag">tokens used</span>
+<span class="dim">[13:48:38]</span> <span class="cyan">claude/stdout</span> 160,317</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <span>WORKDIR</span> <code>~/Desktop/my-project</code>
+        <span class="spacer"></span>
+        <span style="color:var(--lime); text-shadow: 0 0 4px var(--lime);">● LIVE</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div style="padding: 0 40px 60px; max-width: 1600px; margin: 0 auto;">
+  <div class="caption" style="margin-top:20px;"><b>notes</b></div>
+  <ul style="line-height:1.8; font-size: 12.5px; color: var(--ink); opacity: 0.85;">
+    <li>主色：<span style="color:var(--cyan)">■ cyan #00e5ff</span>
+        <span style="color:var(--magenta)">■ magenta #ff2fd6</span>
+        <span style="color:var(--lime)">■ lime #baff29</span>
+        <span style="color:var(--amber)">■ amber #ffb347</span>
+        <span style="color:var(--danger)">■ danger #ff355a</span></li>
+    <li>字体：纯 monospace。macOS 上 "SF Mono"；可选 <code>JetBrains Mono</code> 作为 ship font。</li>
+    <li>外壳：2 层 bevel（亮上暗下边框）+ inset shadow，复刻 Winamp classic skin 的金属边。</li>
+    <li>LCD 区：scanline + 微 cyan glow，呈现 CRT 质感；文字带 text-shadow 做霓虹。</li>
+    <li>PLAY/PAUSE/STOP：SVG 三角 / 双竖条 / 方块，hover 时按颜色分别 glow。Idle 时 Pause/Stop 半透明；Running 时 Play 半透明。</li>
+    <li>Phase segments：LED 方块阵，当前阶段数量亮 magenta/cyan，代表推进度（跟 PRD §5 的 phase 序列对应）。</li>
+    <li>Progress panel：从 transport 下方滑入。包含 6 个 LED 风格大数字（Elapsed/Tokens/Last activity/Round/Failures/Cost）+ 左右分栏 Timeline & Raw。</li>
+    <li>Timeline 行按 outcome 上色：ok=lime，fail=danger，note=amber。Raw stream 里 JSON key 高亮 cyan，usage 数字高亮 magenta。</li>
+    <li>Cost 行是附加项，用 Claude Code stream-json 的 total_cost_usd 字段；不需要的话可以去掉。</li>
+  </ul>
+</div>
+
+</body>
+</html>

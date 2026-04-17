@@ -80,3 +80,20 @@ export async function subscribeEvents(
     return () => {}
   }
 }
+
+// Subscribe to raw stdout/stderr lines from the spawned CLIs. One event per
+// line. Returns an unsubscribe function.
+export async function subscribeRawLog(
+  handler: (line: import('./types').RawLogLine) => void,
+): Promise<() => void> {
+  try {
+    const mod = await import('@tauri-apps/api/event')
+    const un = await mod.listen<import('./types').RawLogLine>(
+      'cccplayer://raw',
+      (payload) => handler(payload.payload),
+    )
+    return () => un()
+  } catch {
+    return () => {}
+  }
+}

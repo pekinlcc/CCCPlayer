@@ -1,120 +1,190 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { classifyWorkdir, runPreflight, startSession } from '../api'
 import type { PreflightReport, SafetyVerdict } from '../types'
+import { Meter, PauseIcon, PlayIcon, Shell, StopIcon } from './Shell'
 
-// Implements PRD §6.2 "首次启动 / 空白态".
+const MAX_GOAL_LEN = 10_000
+
+// Idle screen: folder + goal in one panel. Play button lights up when
+// preflight is green, folder is not blocked, and goal passes validation.
 export function Welcome(props: {
-  preflight: PreflightReport | null
-  workdir: string
-  safety: SafetyVerdict | null
-  onChooseWorkdir: (path: string) => void
+  initialWorkdir?: string
+  onStart: (workdir: string, goal: string) => void
 }) {
-  const { preflight, workdir, safety, onChooseWorkdir } = props
-  const [pathInput, setPathInput] = useState(workdir)
+  const [preflight, setPreflight] = useState<PreflightReport | null>(null)
+  const [workdir, setWorkdir] = useState(props.initialWorkdir ?? '')
+  const [goal, setGoal] = useState('')
+  const [safety, setSafety] = useState<SafetyVerdict | null>(null)
+  const [starting, setStarting] = useState(false)
 
-  const claudeOk =
-    preflight?.claude?.supports_auto_approve === true
+  useEffect(() => {
+    void runPreflight().then(setPreflight)
+  }, [])
+
+  // Re-classify workdir on debounce so the safety banner updates as the
+  // user types / pastes a path.
+  useEffect(() => {
+    const path = workdir.trim()
+    if (!path) {
+      setSafety(null)
+      return
+    }
+    const t = setTimeout(() => {
+      void classifyWorkdir(path).then((r) => setSafety(r.verdict))
+    }, 300)
+    return () => clearTimeout(t)
+  }, [workdir])
+
+  const claudeOk = preflight?.claude?.supports_auto_approve === true
   const codexOk = preflight?.codex?.supports_auto_approve === true
   const preflightGreen = Boolean(preflight?.all_ok)
   const safetyOk = !safety || safety.level === 'ok' || safety.level === 'soft_warn'
-  const canProceed =
-    pathInput.trim().length > 0 && preflightGreen && safetyOk
+  const goalCheck = useMemo(() => validateGoal(goal), [goal])
+  const canPlay =
+    workdir.trim().length > 0 &&
+    preflightGreen &&
+    safetyOk &&
+    goalCheck.ok &&
+    !starting
+
+  async function handlePlay() {
+    if (!canPlay) return
+    setStarting(true)
+    try {
+      await startSession(goal, workdir.trim())
+      props.onStart(workdir.trim(), goal)
+    } finally {
+      setStarting(false)
+    }
+  }
 
   return (
-    <section className="welcome">
-      <p className="tagline">
-        Give two model agents a goal and walk away. They design, build,
-        review, and iterate until done.
-      </p>
+    <Shell status="idle" statusLabel={preflight ? 'No session' : 'Preflight…'}>
+      <div className="display">
+        <div className="dline">
+          <span className="label">Track</span>
+          <span className="value magenta">
+            {goal.trim() ? goal.split('\n')[0].slice(0, 60) : '— · — · —'}
+          </span>
+        </div>
 
-      <div className="card">
-        <h2>Preflight</h2>
+        <div className="dline">
+          <span className="label">Folder</span>
+          <input
+            type="text"
+            className="pathfield"
+            placeholder="/Users/you/dev/my-project"
+            value={workdir}
+            onChange={(e) => setWorkdir(e.target.value)}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+          />
+        </div>
+
+        <div className="goal-box">
+          <span className="prompt">&gt;</span>
+          <textarea
+            value={goal}
+            onChange={(e) => setGoal(e.target.value)}
+            placeholder="Describe what to build / change / fix. One or two paragraphs is plenty."
+            spellCheck={false}
+            rows={5}
+          />
+        </div>
+        <div className="goal-meta">
+          <span>{goal.length.toLocaleString()} / {MAX_GOAL_LEN.toLocaleString()}</span>
+          {!goalCheck.ok && goal.length > 0 && (
+            <span className="warn">· {goalCheck.reason}</span>
+          )}
+        </div>
+
         <ul className="preflight-list">
           <PreflightRow
             label="Claude Code CLI"
-            ok={!!preflight?.claude}
-            detail={
-              preflight?.claude
-                ? preflight.claude.version_line
-                : 'Not found on PATH. Install Claude Code CLI.'
-            }
-          />
-          <PreflightRow
-            label="Claude auto-approve flag"
             ok={claudeOk}
             detail={
-              claudeOk
-                ? `Using flag: ${preflight?.claude?.auto_approve_flag}`
-                : 'CLI does not accept a known auto-approve flag; CCCPlayer needs this to run unattended. Upgrade the CLI.'
+              preflight?.claude
+                ? preflight.claude.version_line +
+                  (preflight.claude.auto_approve_flag
+                    ? ` · flag: ${preflight.claude.auto_approve_flag}`
+                    : '')
+                : preflight
+                ? 'Not on PATH. Install Claude Code CLI.'
+                : 'probing…'
             }
           />
           <PreflightRow
             label="Codex CLI"
-            ok={!!preflight?.codex}
-            detail={
-              preflight?.codex
-                ? preflight.codex.version_line
-                : 'Not found on PATH. Install Codex CLI.'
-            }
-          />
-          <PreflightRow
-            label="Codex auto-approve flag"
             ok={codexOk}
             detail={
-              codexOk
-                ? `Using flag: ${preflight?.codex?.auto_approve_flag}`
-                : 'Same as above — upgrade Codex CLI.'
+              preflight?.codex
+                ? preflight.codex.version_line +
+                  (preflight.codex.auto_approve_flag
+                    ? ` · flag: ${preflight.codex.auto_approve_flag}`
+                    : '')
+                : preflight
+                ? 'Not on PATH. Install Codex CLI.'
+                : 'probing…'
             }
           />
         </ul>
-      </div>
 
-      <div className="card">
-        <h2>Workspace</h2>
-        <p className="hint">
-          Select a local folder. Existing code is fine — CCCPlayer will survey
-          it first and improve on top of it. Do not choose your home directory
-          or a system path (§16.14).
-        </p>
-        <div className="row">
-          <input
-            type="text"
-            placeholder="/Users/you/dev/my-project"
-            value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
-          />
-          <button
-            type="button"
-            onClick={() => onChooseWorkdir(pathInput.trim())}
-            disabled={!canProceed}
-            title={
-              !preflightGreen
-                ? 'Preflight is not green — resolve CLI issues above first'
-                : !pathInput.trim()
-                ? 'Enter a workspace path'
-                : !safetyOk
-                ? 'Workspace path is blocked or requires confirmation'
-                : undefined
-            }
-          >
-            Use this folder
-          </button>
-        </div>
-        {!preflightGreen && (
-          <p className="hint error" style={{ marginTop: 8 }}>
-            Preflight isn't green yet — the Start button will stay disabled
-            until both CLIs are found and support an auto-approve flag.
-          </p>
-        )}
         {safety && <SafetyNotice verdict={safety} />}
       </div>
-    </section>
+
+      <div className="transport">
+        <button
+          type="button"
+          className="tbtn play big"
+          title={
+            !preflightGreen
+              ? 'Preflight not green — fix CLI issues above'
+              : !safetyOk
+              ? 'Workspace is blocked'
+              : !goalCheck.ok
+              ? 'Goal is empty or invalid'
+              : 'Start session'
+          }
+          onClick={handlePlay}
+          disabled={!canPlay}
+        >
+          <PlayIcon />
+        </button>
+        <button type="button" className="tbtn" disabled title="Pause">
+          <PauseIcon />
+        </button>
+        <button type="button" className="tbtn stop" disabled title="Stop">
+          <StopIcon />
+        </button>
+        <span className="sep" />
+        <span className={`pill ${preflightGreen ? 'ok' : 'danger'}`}>
+          Preflight {preflightGreen ? '✓' : '×'}
+        </span>
+        <span className={`pill ${safetyOk ? 'ok' : 'danger'}`}>
+          Workspace {safetyOk ? '✓' : '×'}
+        </span>
+        <span className="spacer" />
+        <div className="meters">
+          <Meter label="CLAUDE" active={false} />
+          <Meter label="CODEX" active={false} />
+        </div>
+      </div>
+
+      <div className="shell-foot">
+        <span>Workdir</span>
+        <code>{workdir.trim() || '—'}</code>
+        <span className="spacer" />
+        <span>v0.1.0</span>
+      </div>
+    </Shell>
   )
 }
 
 function PreflightRow(props: { label: string; ok: boolean; detail: string }) {
   return (
     <li className={`preflight-row ${props.ok ? 'ok' : 'bad'}`}>
-      <span className="dot">{props.ok ? '●' : '●'}</span>
+      <span className="dot">●</span>
       <span className="label">{props.label}</span>
       <span className="detail">{props.detail}</span>
     </li>
@@ -124,33 +194,34 @@ function PreflightRow(props: { label: string; ok: boolean; detail: string }) {
 function SafetyNotice(props: { verdict: SafetyVerdict }) {
   switch (props.verdict.level) {
     case 'ok':
-      return <div className="safety ok">Workspace looks fine.</div>
+      return null // green state is already implicit — no need to shout
     case 'soft_warn':
       return (
         <div className="safety soft-warn">
-          <strong>Heads up:</strong>
-          <ul>
-            {props.verdict.reasons.map((r, i) => (
-              <li key={i}>{r}</li>
-            ))}
-          </ul>
+          Heads up: {props.verdict.reasons.join(' · ')}
         </div>
       )
     case 'strong_warn':
       return (
         <div className="safety strong-warn">
-          <strong>⚠ Confirm before continuing:</strong> {props.verdict.reason}
-          <p className="hint">
-            CCCPlayer will let two agents freely modify files inside this
-            folder. Re-type the absolute path below to confirm.
-          </p>
+          ⚠ Confirm: {props.verdict.reason}
         </div>
       )
     case 'blocked':
       return (
         <div className="safety blocked">
-          <strong>Refused:</strong> {props.verdict.reason}
+          Refused: {props.verdict.reason}
         </div>
       )
   }
+}
+
+function validateGoal(text: string): { ok: true } | { ok: false; reason: string } {
+  const trimmed = text.trim()
+  if (!trimmed) return { ok: false, reason: 'goal is empty' }
+  if (text.length > MAX_GOAL_LEN)
+    return { ok: false, reason: `goal longer than ${MAX_GOAL_LEN} chars` }
+  if (/^[\s\p{P}\p{S}]+$/u.test(trimmed))
+    return { ok: false, reason: 'goal has no words' }
+  return { ok: true }
 }

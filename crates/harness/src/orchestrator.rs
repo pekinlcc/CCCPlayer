@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cccplayer_core::events::{Agent, Event, EventKind};
+use cccplayer_core::events::{Agent, Event, EventKind, RawLogLine, RawStream};
 use cccplayer_core::persistence::{
     append_event, fingerprint, load_usage, save_session_meta, save_usage, FileFingerprint,
 };
@@ -21,8 +21,8 @@ use cccplayer_core::snapshot;
 use cccplayer_core::state::{Phase, SessionState, Verdict};
 use tokio::sync::{mpsc, watch};
 
-use crate::parsers::{parse_goal_check, parse_review};
-use crate::runner::{HarnessRunner, StreamEvent, TurnInput};
+use crate::parsers::{extract_claude_text, parse_goal_check, parse_review};
+use crate::runner::{parse_codex_total_tokens, HarnessRunner, StreamEvent, TurnInput};
 
 /// External handle to pause or stop a running Orchestrator without holding
 /// the `Orchestrator` itself. Cloneable; all clones point at the same
@@ -83,6 +83,11 @@ pub struct Orchestrator {
     cancel: Arc<AtomicBool>,
     /// `true` if `cancel` was a *stop* (abandon), `false` if it was a *pause*.
     stop_not_pause: Arc<AtomicBool>,
+    /// Optional sink for per-line raw stdout/stderr from spawned CLIs. The
+    /// Tauri app layer sets this so the UI can render a live raw-log drawer.
+    /// When `None`, the runner's stream output is still written to the
+    /// on-disk transcripts but not forwarded anywhere else.
+    raw_sink: Option<mpsc::UnboundedSender<RawLogLine>>,
 }
 
 impl Orchestrator {
@@ -108,7 +113,14 @@ impl Orchestrator {
             goal_fingerprint: None,
             cancel: Arc::new(AtomicBool::new(false)),
             stop_not_pause: Arc::new(AtomicBool::new(false)),
+            raw_sink: None,
         })
+    }
+
+    /// Attach a sink that receives every stdout/stderr line produced by
+    /// spawned CLIs, tagged with agent/phase/round. See [`RawLogLine`].
+    pub fn set_raw_sink(&mut self, tx: mpsc::UnboundedSender<RawLogLine>) {
+        self.raw_sink = Some(tx);
     }
 
     /// Returns a handle the caller (AppState) can use to trigger pause/stop
@@ -268,7 +280,10 @@ impl Orchestrator {
                 let (codex_res, codex_delta) = codex_res?;
                 self.apply_usage_delta(Agent::Claude, claude_delta, events_tx);
                 self.apply_usage_delta(Agent::Codex, codex_delta, events_tx);
-                let claude_gc = parse_goal_check(&claude_res.stdout_tail);
+                // Claude's goal-check JSON is buried inside stream-json
+                // envelopes; extract the model text first. Codex emits
+                // plain text, parse directly.
+                let claude_gc = parse_goal_check(&extract_claude_text(&claude_res.stdout_tail));
                 let codex_gc = parse_goal_check(&codex_res.stdout_tail);
                 self.handle_turn_result(claude_res, events_tx).await?;
                 self.handle_turn_result(codex_res, events_tx).await?;
@@ -382,15 +397,28 @@ impl Orchestrator {
             args.push("--workdir".to_string());
             args.push(self.session.workdir().display().to_string());
         } else {
-            // Real CLIs: scope the agent to the workdir. The exact flag name
-            // varies across versions; we pick the most common. The production
-            // path could read this from `cli-info.json`.
-            args.push("-p".to_string());
-            args.push(prompt.0.clone());
-            args.push("--add-dir".to_string());
-            args.push(self.session.workdir().display().to_string());
-            args.push("--output-format".to_string());
-            args.push("stream-json".to_string());
+            // Real CLIs: flag strategy differs per vendor.
+            match agent {
+                Agent::Claude => {
+                    // `claude -p <prompt>` is headless print mode. With
+                    // --output-format=stream-json, --verbose is mandatory
+                    // (Claude Code 2.x enforces this and exits 1 otherwise).
+                    args.push("-p".to_string());
+                    args.push(prompt.0.clone());
+                    args.push("--add-dir".to_string());
+                    args.push(self.session.workdir().display().to_string());
+                    args.push("--output-format".to_string());
+                    args.push("stream-json".to_string());
+                    args.push("--verbose".to_string());
+                }
+                Agent::Codex => {
+                    // Codex 0.1x uses `codex exec <prompt>` for non-
+                    // interactive mode. It takes no --add-dir or
+                    // --output-format flags; stdout is plain text.
+                    args.push("exec".to_string());
+                    args.push(prompt.0.clone());
+                }
+            }
         }
 
         let input = TurnInput {
@@ -453,10 +481,30 @@ impl Orchestrator {
                         Some(StreamEvent::Stdout(line)) => {
                             transcript.extend_from_slice(line.as_bytes());
                             transcript.push(b'\n');
+                            if let Some(tx) = &self.raw_sink {
+                                let _ = tx.send(RawLogLine {
+                                    at: chrono::Utc::now(),
+                                    round,
+                                    agent,
+                                    phase,
+                                    stream: RawStream::Stdout,
+                                    line: line.clone(),
+                                });
+                            }
                         }
                         Some(StreamEvent::Stderr(line)) => {
                             transcript.extend_from_slice(line.as_bytes());
                             transcript.push(b'\n');
+                            if let Some(tx) = &self.raw_sink {
+                                let _ = tx.send(RawLogLine {
+                                    at: chrono::Utc::now(),
+                                    round,
+                                    agent,
+                                    phase,
+                                    stream: RawStream::Stderr,
+                                    line: line.clone(),
+                                });
+                            }
                         }
                         Some(StreamEvent::Usage {
                             input_tokens,
@@ -473,6 +521,11 @@ impl Orchestrator {
                 res = &mut runner => {
                     let result = res?;
                     let _ = std::fs::write(&transcript_path, &transcript);
+                    codex_fallback_usage(
+                        agent,
+                        &transcript,
+                        &mut session_usage_delta,
+                    );
                     let _ = append_event(
                         &self.session,
                         &Event::new(
@@ -501,6 +554,7 @@ impl Orchestrator {
         // Got Finished — wait on runner to retrieve the TurnResult.
         let result = runner.await?;
         let _ = std::fs::write(&transcript_path, &transcript);
+        codex_fallback_usage(agent, &transcript, &mut session_usage_delta);
         let _ = append_event(
             &self.session,
             &Event::new(
@@ -626,6 +680,27 @@ fn agent_name(a: Agent) -> &'static str {
     match a {
         Agent::Claude => "claude",
         Agent::Codex => "codex",
+    }
+}
+
+/// Codex `exec` does not emit per-line stream-json usage; it prints a single
+/// `tokens used\n<N>` pair near the end. If the turn produced no structured
+/// usage events, scan the collected transcript for that pattern and apply it
+/// as a one-shot input-token delta. No-op for Claude or if nothing matches.
+fn codex_fallback_usage(agent: Agent, transcript: &[u8], delta: &mut (u64, u64)) {
+    if agent != Agent::Codex {
+        return;
+    }
+    if delta.0 != 0 || delta.1 != 0 {
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(transcript) else {
+        return;
+    };
+    if let Some(n) = parse_codex_total_tokens(text) {
+        // Codex's total is not split into input/output; bucket it as input
+        // for display. UX will show "claude=I+O codex=N+0".
+        delta.0 = n;
     }
 }
 

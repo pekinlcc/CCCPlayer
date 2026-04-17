@@ -4,6 +4,65 @@ use cccplayer_core::state::Verdict;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+/// Reassemble the model's plain-text reply from a Claude Code
+/// `--output-format stream-json --verbose` stdout transcript.
+///
+/// Each line is a protocol event envelope. The actual text the model wrote
+/// lives in:
+///   * `{"type":"assistant","message":{"content":[{"type":"text","text":"…"},
+///     …]}}` — one per reply turn
+///   * `{"type":"result","result":"…"}` — the final combined reply (present
+///     in single-shot / `-p` invocations)
+///
+/// Everything else (tool_use, tool_result, system, thinking, rate_limit_event)
+/// is discarded. Lines that don't parse as JSON are silently skipped so this
+/// stays tolerant of preamble/trailing noise.
+///
+/// Fallback: if no recognized envelopes are present, return the input
+/// unchanged. This keeps the helper transparent for plain-text output (the
+/// fake CLI used in integration tests, or real runs without `stream-json`).
+pub fn extract_claude_text(stdout: &str) -> String {
+    let mut out = String::new();
+    let mut saw_envelope = false;
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        match v.get("type").and_then(|x| x.as_str()) {
+            Some("assistant") => {
+                if let Some(content) = v
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    saw_envelope = true;
+                    for part in content {
+                        if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                out.push_str(t);
+                                out.push('\n');
+                            }
+                        }
+                    }
+                }
+            }
+            Some("result") => {
+                if let Some(t) = v.get("result").and_then(|t| t.as_str()) {
+                    saw_envelope = true;
+                    out.push_str(t);
+                    out.push('\n');
+                }
+            }
+            _ => {}
+        }
+    }
+    if saw_envelope {
+        out
+    } else {
+        stdout.to_string()
+    }
+}
+
 /// A very tolerant JSON extractor: finds the first fenced ```json block (or
 /// bare JSON object) and parses it. See PRD §16.3.
 pub fn extract_json_block(text: &str) -> Option<serde_json::Value> {
@@ -204,6 +263,54 @@ mod tests {
         let g = parse_goal_check(text).unwrap();
         assert!(!g.done);
         assert_eq!(g.missing.len(), 2);
+    }
+
+    #[test]
+    fn extract_claude_text_from_assistant_and_result() {
+        let stream = concat!(
+            r#"{"type":"system","subtype":"hook_started"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"},{"type":"tool_use","name":"Read"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"..."}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":" world"}]}}"#,
+            "\n",
+            r#"{"type":"result","result":"```json\n{\"done\": false, \"missing\": [\"x\"]}\n```"}"#,
+            "\n",
+        );
+        let text = extract_claude_text(stream);
+        // Assistant texts concatenated.
+        assert!(text.contains("hello"));
+        assert!(text.contains("world"));
+        // Result.result included as-is (the fenced JSON survives).
+        assert!(text.contains("```json"));
+        assert!(text.contains("\"done\""));
+        // tool_use / tool_result / system / user payloads are dropped.
+        assert!(!text.contains("hook_started"));
+    }
+
+    #[test]
+    fn extract_claude_text_falls_back_to_raw_on_plain_text() {
+        // Fake CLI (and any non-stream-json output) emits plain text with a
+        // ```json fence. The extractor must not swallow that.
+        let plain = "```json\n{\"done\": true}\n```\n";
+        assert_eq!(extract_claude_text(plain), plain);
+    }
+
+    #[test]
+    fn goal_check_survives_claude_stream_json_wrapping() {
+        let stream = concat!(
+            r#"{"type":"system","subtype":"init"}"#,
+            "\n",
+            r#"{"type":"result","result":"```json\n{\n  \"done\": false,\n  \"missing\": [\"TranscriptScanner\"],\n  \"next_state\": \"IMPLEMENTING\",\n  \"rationale\": \"M2 absent\"\n}\n```"}"#,
+            "\n",
+        );
+        let text = extract_claude_text(stream);
+        let g = parse_goal_check(&text).expect("goal-check JSON should be recoverable");
+        assert!(!g.done);
+        assert_eq!(g.missing, vec!["TranscriptScanner"]);
+        assert_eq!(g.next_state, "IMPLEMENTING");
     }
 
     #[test]

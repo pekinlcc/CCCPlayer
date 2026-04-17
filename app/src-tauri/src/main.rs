@@ -12,6 +12,14 @@ fn main() {
         )
         .init();
 
+    // Finder-launched .app bundles inherit only the macOS default PATH
+    // (usually `/usr/bin:/bin:/usr/sbin:/sbin`), which excludes Homebrew,
+    // nvm, and most user-local tool installs. That breaks any CLI shipped
+    // as a `#!/usr/bin/env node` script (e.g. Codex), because `env` can't
+    // locate `node`. Prepend the standard tool locations so every child
+    // process we spawn from this point on can resolve them.
+    augment_path();
+
     #[cfg(feature = "tauri")]
     {
         #[cfg(target_os = "macos")]
@@ -54,6 +62,35 @@ mod app_state;
 
 #[cfg(feature = "tauri")]
 mod commands;
+
+/// Prepend well-known CLI installation directories to the process `PATH`.
+/// See the caller for the rationale (Finder-launched .app bundles get a
+/// minimal default PATH that breaks `#!/usr/bin/env node` shebang scripts).
+fn augment_path() {
+    use std::path::PathBuf;
+
+    let mut parts: Vec<PathBuf> = vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(&home);
+        parts.push(home.join(".local/bin"));
+        parts.push(home.join("bin"));
+        parts.push(home.join(".cargo/bin"));
+        parts.push(home.join(".volta/bin"));
+        parts.push(home.join(".bun/bin"));
+    }
+    if let Some(p) = std::env::var_os("PATH") {
+        for x in std::env::split_paths(&p) {
+            parts.push(x);
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(&parts) {
+        std::env::set_var("PATH", joined);
+    }
+    tracing::info!("augmented PATH for child process spawning");
+}
 
 /// macOS only: ask the OS not to App-Nap us while we may be running long
 /// agent turns in the background. See PRD §16.12.

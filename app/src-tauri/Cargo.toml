@@ -29,7 +29,7 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
-tauri = { version = "2", optional = true }
+tauri = { version = "2", optional = true , features = [] }
 tauri-plugin-notification = { version = "2", optional = true }
 
 # macOS-only: NSProcessInfo.beginActivity for App Nap suppression (§16.12).
