@@ -18,6 +18,10 @@ Claude Code 负责设计与实现，Codex 负责评审，两者通过一组共�
 - 用户不需要写 prompt、不需要手动粘贴评审结论，全部由客户端调度。
 - 所有中间产物是**人类可读的 Markdown**，随时可以暂停、审阅、甚至手工修改后继续。
 
+设计哲学：**烧算力，不烧用户时间**。应用默认不对 token 或 wall-clock 设任何上限；
+只在真正卡死（进程无心跳）或真正震荡（多轮无进展）时才中断。用户按"开始"之后
+希望回来看到的是"已完成"，而不是"因为跑得太久所以停了等你确认"。
+
 ## 2. 目标用户 & 前置条件
 
 - 目标用户：在 macOS 上已配置好 Claude Code 与 Codex CLI 的开发者。
@@ -128,7 +132,8 @@ Claude Code 负责设计与实现，Codex 负责评审，两者通过一组共�
 关键交互点：
 - **"开始"是幂等的**：无论当前 Session 是 CREATED / PAUSED / ERRORED / DONE，
   点下去都会先做一次"目标是否已达成"的检测再决定动作（见 §7）。
-- 设置页：模型选择、每 Round 超时、最大 Round 数、自定义 prompt 模板、CLI 绝对路径。
+- 设置页：模型选择、无心跳超时（默认 10 分钟）、可选 Round 数硬帽（默认关闭）、
+  自定义 prompt 模板、CLI 绝对路径。
 
 ### 6.1 进度显示：三段式
 
@@ -289,15 +294,22 @@ Verdict 段格式（由 prompt 约束，解析器宽容）：
 
 ## 11. 停止条件
 
-Round 循环的终止满足**任一**即可：
+Round 循环**不设**整体时长上限，也不设 token 预算。只在以下情形停止：
 
-1. 最近一轮 Codex verdict == `approved` **且** Claude Code 与 Codex 的 Goal-Check
-   **都**返回 `done == true`（两票一致）。
-2. 达到最大 Round 数（默认 20，可配置），进入 `ERRORED`，等待用户决策。
-3. 用户显式暂停 / 停止。
-4. 连续 2 轮评审内容高度相似（haiku 做相似度判断）→ 判定"震荡"，进入 `ERRORED`。
-5. Goal-Check 双方在同一 Round 内分歧 3 次且 missing 列表稳定不变 → "震荡"，
-   进入 `ERRORED`。
+1. **目标达成**（终态 `DONE`）：最近一轮 Codex verdict == `approved` **且**
+   Claude Code 与 Codex 的 Goal-Check **都**返回 `done == true`。
+2. **用户显式暂停 / 停止**。
+3. **进程卡死**（进入 `ERRORED`）：stream-json 事件流连续 10 分钟无任何新事件
+   （可在设置里调），视作 harness 无心跳，触发一次自动 cancel + 重试；再次卡死
+   则停下来等用户介入。这是**唯一的被动时间判断**。
+4. **震荡**（进入 `ERRORED`，等用户介入）：
+   - 连续 2 轮 Codex 评审的 blocking 列表高度相似（Haiku 做相似度判断）；或
+   - 同一 Round 内双方 Goal-Check 分歧 3 次且 `missing` 列表稳定不变。
+5. **认证失效**（进入 `PAUSED`）：harness 检测到 CLI 返回认证错误，提示用户
+   登录后恢复（见 §16.2）。
+
+**默认没有** Round 数上限、没有 Session wall-clock、没有 token 预算。设置里提供
+可选的 Round 数硬帽（默认关闭）给想兜底的用户。
 
 ## 12. 安全与权限
 
@@ -386,13 +398,24 @@ Round 循环的终止满足**任一**即可：
   only the JSON block this time"。两次都失败 → 本 turn 计入失败，进入 `ERRORED`
   等用户介入。
 
-### 16.4 预算上限
+### 16.4 卡死检测（替代传统"超时预算"）
 
-- 单 turn wall-clock 30 分钟硬超时；超时走 cancel 协议（SIGINT → SIGTERM → SIGKILL）。
-- Session 默认上限：20 Round 或累计 4 小时，两者先到即进 `ERRORED`。
-- 这些都在设置页可改，但设有非零下限，避免一键跑失控。
-- 不做 token 级别的硬预算：CLI 层面不暴露此控制。事件流里展示 CLI 回报的 token
-  用量供用户自己判断。
+设计哲学是"烧算力、不烧用户时间"，因此**不设** token 预算，也**不设** turn / Session
+的 wall-clock 硬超时。取而代之的是**无心跳检测**：
+
+- 每个 harness 维护一个"最近事件时间戳"——只要 stream-json 发来任何事件（工具调
+  用、文件读写、进度、token 结算），时间戳就刷新。
+- 默认 10 分钟无新事件（设置里可调 1–60 分钟）→ 认为进程卡死：
+  1. 先发 SIGINT 触发 CLI 自己的清理；5 秒后无退出再 SIGTERM；再 5 秒 SIGKILL。
+  2. 回滚本 turn 到 Round 起始 snapshot，**自动重试一次**。
+  3. 重试仍卡死 → 进 `ERRORED`，等用户介入。
+- 事件流里展示 CLI 回报的 token 用量，纯信息性；不构成停止条件。
+- 用户想要兜底时，可在设置里开启"Round 数硬帽"（默认关闭），或手动点暂停 / 停止。
+
+**不做**的事：
+- 不按 token 数停。
+- 不按 Session 累计 wall-clock 停。
+- 不按单 turn wall-clock 停（只要进程仍在正常推进事件，哪怕 2 小时也不干预）。
 
 ### 16.5 原子写与回滚
 
@@ -603,7 +626,7 @@ next_state rules:
 | 7 | 登录态 | 依赖 CLI 自有 token；preflight 引导，不代劳 | §16.2 |
 | 8 | PATH 陷阱 | 固定路径探测 + 用户可填绝对路径 | §16.2 |
 | 9 | Goal-Check 解析 | 围栏 JSON + 宽容解析 + 单次重试 | §16.3 |
-| 10 | 预算 | 单 turn 30 分钟、Session 20 Round/4 小时 | §16.4 |
+| 10 | 预算 | 不设 token / wall-clock 上限；只做无心跳卡死检测（默认 10 分钟） | §16.4、§11 |
 | 11 | 原子写与回滚 | prompt 强制 tmp+rename，turn 取消回滚到 Round 起始快照 | §16.5 |
 | 12 | 模型 | 默认 Claude Opus 4.7 + Codex reasoning=high | §16.6 |
 | 13 | 进度显示 | 状态条 + 事件时间线 + 原始日志抽屉 | §6.1 |
