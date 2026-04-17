@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::events::Event;
-use crate::session::{Session, SessionMeta};
+use crate::session::{Session, SessionMeta, UsageTotals};
 
 /// Write `bytes` to `path` atomically: write to `path.tmp`, fsync, rename.
 /// See PRD §8 "关键文件落盘 fsync" and §16.5.
@@ -46,6 +46,20 @@ pub fn load_session_meta(session: &Session) -> Result<Option<SessionMeta>> {
     }
     let text = std::fs::read_to_string(path)?;
     Ok(Some(serde_json::from_str(&text)?))
+}
+
+pub fn save_usage(session: &Session, u: &UsageTotals) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(u)?;
+    atomic_write(&session.usage_path(), &bytes)
+}
+
+pub fn load_usage(session: &Session) -> Result<UsageTotals> {
+    let path = session.usage_path();
+    if !path.exists() {
+        return Ok(UsageTotals::default());
+    }
+    let text = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&text).unwrap_or_default())
 }
 
 /// Append a single [`Event`] as one JSON line to `events.log` and fsync.

@@ -20,6 +20,23 @@ pub struct AgentUsage {
     pub output_tokens: u64,
 }
 
+/// Persistent accumulator for `.cccplayer/usage.json`. See PRD §16.7.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageTotals {
+    pub claude: AgentUsage,
+    pub codex: AgentUsage,
+}
+
+impl UsageTotals {
+    pub fn claude_total(&self) -> u64 {
+        self.claude.input_tokens + self.claude.output_tokens
+    }
+
+    pub fn codex_total(&self) -> u64 {
+        self.codex.input_tokens + self.codex.output_tokens
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChildProcessRecord {
     pub pid: i32,

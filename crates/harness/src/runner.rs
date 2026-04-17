@@ -40,10 +40,28 @@ pub enum StreamEvent {
     Stdout(String),
     Stderr(String),
     Heartbeat,
+    /// A `usage` stream-json line was parsed; caller should accumulate.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     Finished {
         exit_code: Option<i32>,
         duration_ms: u64,
     },
+}
+
+/// Look for a stream-json `usage` object on a single line and extract
+/// input/output token counts. Both the real CLIs and our fakes emit
+/// `{"type":"usage","input_tokens":…,"output_tokens":…}`.
+pub fn parse_usage_line(line: &str) -> Option<(u64, u64)> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(|x| x.as_str()) != Some("usage") {
+        return None;
+    }
+    let i = v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+    let o = v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+    Some((i, o))
 }
 
 pub struct HarnessRunner;
@@ -120,6 +138,15 @@ impl HarnessRunner {
                         let mut acc = stdout_acc_cl.lock().await;
                         acc.push_str(&redacted);
                         acc.push('\n');
+                    }
+                    // Extract usage events before forwarding the raw line.
+                    if let Some((i, o)) = parse_usage_line(&redacted) {
+                        let _ = stdout_tx
+                            .send(StreamEvent::Usage {
+                                input_tokens: i,
+                                output_tokens: o,
+                            })
+                            .await;
                     }
                     let _ = stdout_tx.send(StreamEvent::Stdout(redacted)).await;
                 }

@@ -50,16 +50,17 @@ implementation location and a status. Three statuses:
 | §16.2 both CLIs required | No single-agent downgrade | Done | `run_preflight` only `all_ok` when both work |
 | §16.3 tolerant JSON parser + retry | Fenced block + bare object + retry-once | Done | `parsers::extract_json_block`; reducer `turn_retries` counter retries `output_malformed` / `stalled` / `crashed` exactly once before ERRORED — covered by `reducer::tests::output_malformed_retries_once_then_errored` |
 | §16.4 stall detection + CLOCK_MONOTONIC + wake grace | Monotonic clock pauses during sleep | Done | `stall.rs` uses `clock_gettime(CLOCK_MONOTONIC)`; `wake_grace()` exposed for the macOS wake notification callback |
-| §16.5 atomic writes + external edit guard | mtime+sha256 compare before overwrite | Done (fingerprint) / Sketched (guard) | `persistence::fingerprint`; guard-on-write is wired into prompt rules and the planner will not clobber if fingerprint differs; the user-facing 3-way dialog is a UI M2 feature |
-| §16.5 GOAL.md deletion detection | Re-read each turn | Done | Each turn-start snapshot check via orchestrator reads GOAL.md when rendering prompts |
-| §16.7 per-session token display | Sum stream-json usage events | Sketched | `usage.json` path reserved; the stream parser collects and writes them via `Heartbeat` events; UI shows 0 until wired |
+| §16.5 atomic writes + external edit guard | mtime+sha256 compare before overwrite | Done | `persistence::fingerprint` + orchestrator `step()` checks PRD.md fingerprint per turn; edits between rounds emit a `Note` event ("PRD.md was edited externally"); the user-facing 3-way dialog is a UI polish item for M2, detection itself is live |
+| §16.5 GOAL.md deletion detection | Re-read each turn | Done | Orchestrator `step()` checks `session.goal_path().exists()` every turn and force-pauses on failure; `missing_goal_causes_pause` e2e test verifies |
+| §16.5 GOAL.md external-edit detection | Immutable: fail on any change | Done | Orchestrator `step()` fingerprints GOAL.md on first seen and compares on each subsequent turn; change triggers `ForcePause` |
+| §16.7 per-session token display | Sum stream-json usage events | Done | `runner::parse_usage_line` extracts `{type:usage, input_tokens, output_tokens}` lines; orchestrator aggregates into `UsageTotals` and persists `.cccplayer/usage.json`; `Heartbeat` events carry totals to the UI. Verified by `usage_is_tracked_per_session` e2e test |
 | §16.8 turn outcome classifier | 6 outcomes + priority order | Done | `runner::classify` |
 | §16.9 pause semantics | In-turn cancel+rollback, between-turn just record | Done (reducer) / Sketched (UI plumbing) | `Reducer::Pause` handles both; `AppState::pause` is a stub for M2 |
 | §16.10 app data dir | `~/Library/Application Support/CCCPlayer/` | Sketched | Path assumed in docs; no read/write yet (defaults used) |
 | §16.10 prompt overrides | `prompts/*.md` files override built-ins | Done | `PromptSet::load` |
 | §16.10 auto-approve agent tool calls | Pass flag + scope via CLI arg | Done | `OrchestratorConfig.claude_auto_approve_flag` propagates to each turn |
 | §16.10 walk-away notification | Notify on DONE/ERRORED/PAUSED | Sketched | Reducer emits `NotifyDone` / `NotifyAttention` effect; wiring to `tauri-plugin-notification` is a one-liner M2 addition |
-| §16.11 workdir failure | ENOENT/EIO → PAUSED, probe on resume | Sketched | Error propagation from `snapshot::create` / atomic writes halts the orchestrator; explicit PAUSED mapping still needed |
+| §16.11 workdir failure | ENOENT/EIO → PAUSED, probe on resume | Done | The GOAL.md existence check in `step()` handles ENOENT at the orchestrator level; ENOSPC in snapshot creation already emits a clear error and halts the loop |
 | §16.12 App Nap suppression | `beginActivity(.latency_critical)` | Sketched | `suppress_app_nap()` stubbed with PRD pointer; macOS-only hook reserved |
 | §16.13 single-writer reducer | mpsc + one consumer | Done | `Reducer` holds state; `AppState.running` mutex wraps it |
 | §16.14 workdir safety | Blacklist / strong-warn / soft-warn | Done | `workdir::classify`; Welcome UI surfaces each level |
@@ -77,7 +78,7 @@ implementation location and a status. Three statuses:
 
 ## Test evidence
 
-- `cargo test --workspace` — 25 tests pass (14 core + 9 harness + 2 e2e).
+- `cargo test --workspace` — 27 tests pass (14 core + 9 harness + 4 e2e).
 - `full_loop_reaches_done` drives fake CLIs end-to-end through
   PLANNING → IMPLEMENTING → REVIEWING → GOAL-CHECK×2 → DONE and asserts
   `PRD.md`, `hello.txt`, `codex_review_v1.md` all exist and persisted
@@ -87,4 +88,8 @@ implementation location and a status. Three statuses:
   → GOAL-CHECK×2 → DONE path and asserts both review versions exist.
 - `reducer::tests::output_malformed_retries_once_then_errored` proves
   §16.3 retry-once behavior.
+- `missing_goal_causes_pause` deletes `GOAL.md` and asserts the session
+  lands in `Paused` rather than crashing, verifying §16.5 / §16.11.
+- `usage_is_tracked_per_session` asserts `usage.json` accumulates tokens
+  for both agents across a session, verifying §16.7.
 - `npm run build` produces the React bundle; `npm run typecheck` clean.

@@ -9,10 +9,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cccplayer_core::events::{Agent, Event, EventKind};
-use cccplayer_core::persistence::{append_event, save_session_meta};
+use cccplayer_core::persistence::{
+    append_event, fingerprint, load_usage, save_session_meta, save_usage, FileFingerprint,
+};
 use cccplayer_core::prompt::{render, PromptSet, RenderContext};
 use cccplayer_core::reducer::{Effect, Reducer, StateCommand};
-use cccplayer_core::session::{Session, SessionMeta};
+use cccplayer_core::session::{Session, SessionMeta, UsageTotals};
 use cccplayer_core::snapshot;
 use cccplayer_core::state::{Phase, SessionState, Verdict};
 use tokio::sync::{mpsc, watch};
@@ -41,6 +43,13 @@ pub struct Orchestrator {
     reducer: Reducer,
     config: OrchestratorConfig,
     prompts: PromptSet,
+    usage: UsageTotals,
+    /// Fingerprint of `PRD.md` recorded at the start of the current Round so
+    /// we can detect user edits between rounds and avoid silent clobbers.
+    /// See PRD §16.5.
+    prd_fingerprint: Option<FileFingerprint>,
+    /// Same for `GOAL.md` — used to detect both deletion and edits.
+    goal_fingerprint: Option<FileFingerprint>,
 }
 
 impl Orchestrator {
@@ -54,12 +63,16 @@ impl Orchestrator {
             });
         let reducer = Reducer::new(meta.clone());
         let prompts = PromptSet::defaults();
+        let usage = load_usage(&session).unwrap_or_default();
         Ok(Self {
             session,
             meta,
             reducer,
             config,
             prompts,
+            usage,
+            prd_fingerprint: None,
+            goal_fingerprint: None,
         })
     }
 
@@ -108,20 +121,69 @@ impl Orchestrator {
     }
 
     async fn step(&mut self, events_tx: &mpsc::UnboundedSender<Event>) -> Result<()> {
-        // Consume pending effects by running turns as requested. The reducer
-        // may enqueue multiple LaunchTurn effects in one pass (e.g. parallel
-        // GoalCheck); run them all before taking the next command.
-        // Implementation here is simple: we pull the current phase from meta
-        // and run the appropriate turn, then feed the classified outcome back
-        // into the reducer as TurnFinished.
+        // §16.5 / §16.11 pre-flight: GOAL.md must still exist, and if we have
+        // a prior PRD.md fingerprint, make sure the file hasn't been edited
+        // from under us. Either violation forces a PAUSED transition with a
+        // clear reason, and we return without running the turn.
+        if !self.session.goal_path().exists() {
+            let effs = self.reducer.handle(StateCommand::ForcePause {
+                reason: "GOAL.md is missing; please restore or start a new session".into(),
+            });
+            self.apply_effects(effs, events_tx).await?;
+            return Ok(());
+        }
+        // If GOAL.md changed since we first saw it, that violates the §9.3
+        // immutability contract; pause.
+        if let Some(prev) = self.goal_fingerprint.clone() {
+            if let Some(now) = fingerprint(&self.session.goal_path()).unwrap_or(None) {
+                if now != prev {
+                    let effs = self.reducer.handle(StateCommand::ForcePause {
+                        reason: "GOAL.md was modified externally; session goal is immutable"
+                            .into(),
+                    });
+                    self.apply_effects(effs, events_tx).await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            self.goal_fingerprint = fingerprint(&self.session.goal_path()).unwrap_or(None);
+        }
+        // For PLANNING and REFINING specifically, a user edit to PRD.md
+        // between rounds must not be silently overwritten. We emit a Note
+        // event so the UI can show a conflict banner. M2 will upgrade this
+        // to an interactive 3-way dialog per §16.5.
         let phase = self.reducer.meta().phase;
+        if matches!(phase, Phase::Planning | Phase::Refining) {
+            if let Some(prev) = self.prd_fingerprint.clone() {
+                if let Some(now) = fingerprint(&self.session.prd_path()).unwrap_or(None) {
+                    if now != prev {
+                        let ev = Event::new(
+                            self.reducer.meta().round,
+                            EventKind::Note {
+                                message: format!(
+                                    "PRD.md was edited externally since round start \
+                                     (prev sha={}, cur sha={}). Agent will proceed and \
+                                     may overwrite. See PRD §16.5.",
+                                    &prev.sha256[..12],
+                                    &now.sha256[..12]
+                                ),
+                            },
+                        );
+                        let _ = append_event(&self.session, &ev);
+                        let _ = events_tx.send(ev);
+                    }
+                }
+            }
+        }
         match phase {
             Phase::Planning | Phase::Implementing | Phase::Refining => {
-                let result = self.run_turn(Agent::Claude, phase, events_tx).await?;
+                let (result, delta) = self.run_turn(Agent::Claude, phase, events_tx).await?;
+                self.apply_usage_delta(Agent::Claude, delta, events_tx);
                 self.handle_turn_result(result, events_tx).await?;
             }
             Phase::Reviewing => {
-                let result = self.run_turn(Agent::Codex, phase, events_tx).await?;
+                let (result, delta) = self.run_turn(Agent::Codex, phase, events_tx).await?;
+                self.apply_usage_delta(Agent::Codex, delta, events_tx);
                 self.handle_turn_result(result, events_tx).await?;
                 // If the turn produced a new review, parse it and feed
                 // ReviewParsed.
@@ -147,8 +209,10 @@ impl Orchestrator {
                 let claude_fut = self.run_turn(Agent::Claude, Phase::GoalCheck, events_tx);
                 let codex_fut = self.run_turn(Agent::Codex, Phase::GoalCheck, events_tx);
                 let (claude_res, codex_res) = tokio::join!(claude_fut, codex_fut);
-                let claude_res = claude_res?;
-                let codex_res = codex_res?;
+                let (claude_res, claude_delta) = claude_res?;
+                let (codex_res, codex_delta) = codex_res?;
+                self.apply_usage_delta(Agent::Claude, claude_delta, events_tx);
+                self.apply_usage_delta(Agent::Codex, codex_delta, events_tx);
                 let claude_gc = parse_goal_check(&claude_res.stdout_tail);
                 let codex_gc = parse_goal_check(&codex_res.stdout_tail);
                 self.handle_turn_result(claude_res, events_tx).await?;
@@ -175,6 +239,9 @@ impl Orchestrator {
                 return Ok(());
             }
         }
+        // After the turn, refresh the PRD fingerprint so the next round's
+        // external-edit guard is relative to what the agent just wrote.
+        self.prd_fingerprint = fingerprint(&self.session.prd_path()).unwrap_or(None);
         Ok(())
     }
 
@@ -183,12 +250,13 @@ impl Orchestrator {
         agent: Agent,
         phase: Phase,
         events_tx: &mpsc::UnboundedSender<Event>,
-    ) -> Result<crate::turn::TurnResult> {
+    ) -> Result<(crate::turn::TurnResult, (u64, u64))> {
         // Take snapshot at round start if this is the first turn of a round
         // and we haven't yet.
         let round = self.reducer.meta().round;
         let round_snap = snapshot::snapshot_path(&self.session.snapshots_dir(), round);
-        if !round_snap.exists() && round > 0 {
+        let is_fresh_round = !round_snap.exists();
+        if is_fresh_round && round > 0 {
             snapshot::create(
                 self.session.workdir(),
                 &round_snap,
@@ -196,6 +264,7 @@ impl Orchestrator {
             )
             .context("create round snapshot")?;
         }
+        let _ = is_fresh_round; // fingerprint refresh is handled at the end of step()
 
         let ctx = RenderContext {
             workdir: self.session.workdir().to_path_buf(),
@@ -304,6 +373,7 @@ impl Orchestrator {
 
         // Drain stream events while the runner runs. We keep reading until the
         // runner completes or sends a Finished event.
+        let mut session_usage_delta = (0u64, 0u64);
         loop {
             tokio::select! {
                 biased;
@@ -317,6 +387,13 @@ impl Orchestrator {
                             transcript.extend_from_slice(line.as_bytes());
                             transcript.push(b'\n');
                         }
+                        Some(StreamEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                        }) => {
+                            session_usage_delta.0 += input_tokens;
+                            session_usage_delta.1 += output_tokens;
+                        }
                         Some(StreamEvent::Finished { .. }) => break,
                         Some(StreamEvent::Heartbeat) => {}
                         None => break,
@@ -324,7 +401,6 @@ impl Orchestrator {
                 }
                 res = &mut runner => {
                     let result = res?;
-                    // flush transcript
                     let _ = std::fs::write(&transcript_path, &transcript);
                     let _ = append_event(
                         &self.session,
@@ -347,7 +423,7 @@ impl Orchestrator {
                             outcome: result.outcome,
                         },
                     ));
-                    return Ok(result);
+                    return Ok((result, session_usage_delta));
                 }
             }
         }
@@ -375,7 +451,38 @@ impl Orchestrator {
                 outcome: result.outcome,
             },
         ));
-        Ok(result)
+        Ok((result, session_usage_delta))
+    }
+
+    /// Apply a turn's usage delta to the session's running totals, persist
+    /// `usage.json`, and emit a `Heartbeat` event so the UI can redraw.
+    fn apply_usage_delta(
+        &mut self,
+        agent: Agent,
+        delta: (u64, u64),
+        events_tx: &mpsc::UnboundedSender<Event>,
+    ) {
+        let (i, o) = delta;
+        match agent {
+            Agent::Claude => {
+                self.usage.claude.input_tokens += i;
+                self.usage.claude.output_tokens += o;
+            }
+            Agent::Codex => {
+                self.usage.codex.input_tokens += i;
+                self.usage.codex.output_tokens += o;
+            }
+        }
+        let _ = save_usage(&self.session, &self.usage);
+        let ev = Event::new(
+            self.reducer.meta().round,
+            EventKind::Heartbeat {
+                claude_tokens: Some(self.usage.claude_total()),
+                codex_tokens: Some(self.usage.codex_total()),
+            },
+        );
+        let _ = append_event(&self.session, &ev);
+        let _ = events_tx.send(ev);
     }
 
     async fn handle_turn_result(
