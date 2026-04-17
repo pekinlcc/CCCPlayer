@@ -126,91 +126,137 @@ CCCPlayer 必须优雅处理工作目录的所有合理起始状态。**不假�
 
 ## 6. UI / 交互设计
 
-一个极简单页应用，参考"唱片机"的隐喻（呼应 CCCPlayer 名字）：
+视觉语言：**Winamp classic 金属外壳 + 赛博朋克霓虹**的融合。单窗口 Tauri 应用，
+所有屏幕都裹在一层 chrome shell 里（假标题栏 + LCD 显示屏 + transport 控件 + 页脚），
+全 monospace 字体，文字带 neon text-shadow。定稿视觉原型见
+[`ui/mockups/cyberpunk-preview.html`](ui/mockups/cyberpunk-preview.html)，
+可在浏览器直接打开审视。
+
+整体有两个屏幕：**Idle（Play 按钮可点即可开始）**和 **Running（Play 变灰，
+Progress 面板展开到 transport 下方）**。不走"多步选目录 → 填目标 → 开始"的
+向导，而是**单屏所有字段同时可编辑**——只有 preflight 全绿 + workdir 安全 + 目标
+非空时 Play 才亮起。
 
 ```
-┌──────────────────────────────────────────────┐
-│  CCCPlayer                               ⚙︎   │
-├──────────────────────────────────────────────┤
-│  目标                                         │
-│  ┌────────────────────────────────────────┐  │
-│  │ 多行输入框（支持 Markdown 粘贴）          │  │
-│  └────────────────────────────────────────┘  │
-│                                              │
-│  工作目录： ~/dev/todo-cli         [选择…]    │
-│                                              │
-│       ┌─────────┐  ┌─────────┐               │
-│       │  开始   │  │  暂停   │   Round 3/∞   │
-│       └─────────┘  └─────────┘               │
-│                                              │
-│  当前阶段： REVIEWING (Codex) ████░░░░░░     │
-│  最近产出： codex_review_v3.md  [打开]        │
-│                                              │
-│  ── 事件流 ─────────────────────────────────  │
-│  13:04  Claude Code 已更新 PRD.md (+42/-8)    │
-│  13:11  Claude Code 实现完成，耗时 6m41s      │
-│  13:12  Codex 开始评审…                      │
-│  13:18  Codex verdict: changes_requested (4) │
-│  …                                           │
-└──────────────────────────────────────────────┘
+┌── shell titlebar ────────────────────────────────────────────────┐
+│ ●●●  CCCPLAYER  CLAUDE·CODE × CODEX              ◇ NO SESSION   │
+├── display (LCD, scanlines) ─────────────────────────────────────┤
+│  TRACK  — · — · —                                                │
+│  FOLDER [ /Users/you/dev/my-project              ]              │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ > Describe what to build / change / fix.                 │  │
+│  │                                                          │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│  42 / 10,000                                                    │
+│  ● CLAUDE CODE CLI      2.1.112 · flag: --dangerously-skip-…    │
+│  ● CODEX CLI            0.121   · flag: --dangerously-bypass-…  │
+├── transport ────────────────────────────────────────────────────┤
+│  ▶  ⏸  ■   [PREFLIGHT ✓] [WORKSPACE ✓]         CLAUDE▁▂▃▄ CODEX│
+├── foot ─────────────────────────────────────────────────────────┤
+│  WORKDIR /Users/you/dev/my-project                    v0.1.0   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+一旦点 Play，UI 切到 Running 态：`TRACK` 变成目标首行，下方多出一条 phase LED 段位
+条（PLANNING→IMPLEMENTING→REVIEWING→REFINING→GOAL_CHECK，当前阶段磁红亮起），
+transport 下方滑出一个 **Progress 面板**：5 个 LED 大数字 KV 块
+（Elapsed / Tokens / Last activity / Round / Failures）+ 下方左右双栏
+Timeline & Raw stream。
+
+```
+├── transport ────────────────────────────────────────────────────┤
+│  ▶  ⏸  ■   [T+ 11:02] [1m 26s ago] [2 fail]    CLAUDE▁▂▃▄ …    │
+├── progress ─────────────────────────────────────────────────────┤
+│  ▼ PROGRESS                           LIVE · 1,226 RAW LINES    │
+│                                                                 │
+│  ELAPSED  TOKENS              LAST ACTIVITY  ROUND  FAILURES   │
+│  11:02    496 + 199,630       1m 26s ago     13      0          │
+│                                                                 │
+│  ┌─ TIMELINE · 10 ──────────┐  ┌─ RAW STREAM · 1226 ────────┐  │
+│  │ 23:05  agent_started …   │  │ {"type":"assistant",       │  │
+│  │ 23:08  agent_finished ok │  │  "message":{ … }}           │  │
+│  │ 23:08  state_changed …   │  │ claude/stdout              │  │
+│  └──────────────────────────┘  └────────────────────────────┘  │
+├── foot ─────────────────────────────────────────────────────────┤
+│  WORKDIR /Users/you/dev/my-project                    ● LIVE   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 关键交互点：
 - **"开始"是幂等的**：无论当前 Session 是 CREATED / PAUSED / ERRORED / DONE，
   点下去都会先做一次"目标是否已达成"的检测再决定动作（见 §7）。
-- 设置页：模型选择、无心跳超时（默认 10 分钟）、可选 Round 数硬帽（默认关闭）、
+- Transport 的三个按钮都是 SVG **几何图形**，跟播放器对齐：`▶` 三角 Play（lime）、
+  `⏸` 双竖条 Pause、`■` 方块 Stop（红）。Idle 时 Pause/Stop 灰显，Running 时 Play 灰显。
+- Session 结束（Done / Stopped / Errored）后 Progress 面板替换为结果横幅，上面两个
+  按钮：**New session (same folder)** 直接跳回 Idle 带上当前 workdir；**← Back to start**
+  清空 workdir 回到完全空态。避免"点完 Stop 就卡死在终态无法后退"的死胡同。
+- 设置页（M2）：模型选择、无心跳超时（默认 10 分钟）、可选 Round 数硬帽（默认关闭）、
   自定义 prompt 模板、CLI 绝对路径。
+
+### 6.0 视觉设计语言
+
+| 元素 | 规范 |
+| --- | --- |
+| 主色 | Cyan `#00e5ff` / Magenta `#ff2fd6` / Lime `#baff29` / Amber `#ffb347` / Danger `#ff355a` |
+| 字体 | `ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace` |
+| 背景 | 近黑 `#07070c`，两处径向光晕（magenta 左上、cyan 右下） |
+| 外壳 | 2 层 bevel（亮上暗下）+ 外投阴影；复刻 Winamp classic 的金属边 |
+| LCD 区 | CRT scanline 水平条纹 + 微 cyan 内投光，文字带 text-shadow glow |
+| Neon | 所有强调数字 / 标签用 text-shadow blur 制造霓虹 |
+| 大数字 KV | Letter-spacing 2px + tabular-nums，17px 粗体，按语义上色（lime=tokens、amber=stale、danger=fail） |
+| 图标 | `app/src-tauri/icons/_source/icon.svg`（Glitched CCC：三个 C 带 RGB 色差 + 扫描线） |
 
 ### 6.1 进度显示：三段式
 
 为了避免"长 turn 里 UI 看起来卡死"和"直接裸露 stdout 太吵"两个极端，运行中的
-主界面分为三个区域：
+主界面分为三个区域（在 shell 里从上到下排布）：
 
-1. **顶部状态条**：当前阶段（PLANNING/IMPLEMENTING/REVIEWING/REFINING/…）、
-   Round N、已耗时、最近一次心跳（从 stream-json 中拿到最新事件的时间戳）。
-2. **事件时间线（默认主视图）**：结构化事件流，不是 stdout 原文。数据源是两个 CLI
-   的 stream-json 输出（`claude --output-format stream-json`、Codex 对应模式），
-   我们解析后产出如下事件类型：
+1. **Display + Transport**（Shell 上半部，常驻）：Phase LED 段位、Round、Track
+   （目标首行）、workdir、transport 三按钮（Play/Pause/Stop），以及三个右侧
+   状态 pill——`T+ 11:02`（elapsed，cyan）、`1m 26s ago`（last activity，超
+   过 60s 变 amber 提醒可能卡住）、`N fail`（失败计数，>0 时红色显示）。
+   这是"一眼就能判断还活着吗"的层。
+2. **Progress 面板 → Timeline**（左栏）：结构化事件流，不是 stdout 原文。数据源
+   是 Tauri 事件 `cccplayer://event`（orchestrator push），我们按事件种类上色：
+   `agent_finished` 成功 lime，失败（crashed / auth_failed / stalled / refused /
+   output_malformed / flapping）直接红字；`note` / `error` amber；每行渲染关键
+   payload，比如 `agent_finished claude IMPLEMENTING — ok (305s)`、
+   `review_written v12 — approved (0 blocking)`、`note turn returned Crashed;
+   retrying once…`。事件种类包括：
    - `AgentStarted {agent, phase}`
+   - `AgentFinished {agent, phase, duration_ms, outcome}`
    - `FileEdited {path, added, removed}` / `FileCreated {path}` / `FileRead {path}`
    - `ToolInvoked {name, summary}`（如 `cargo check`、`rg "TODO"`）
    - `ReviewWritten {version, verdict, blocking_count}`
-   - `GoalCheck {agent, done, missing}`
-   - `Error {kind, message}`、`Heartbeat {token_usage}`
-   - `AgentFinished {agent, phase, duration}`
-   
-   每条事件可点开看对应的 transcript 片段。
-3. **原始日志抽屉**（右侧可折叠）：实时流 stdout+stderr，带搜索；默认收起，给
-   debug 使用，不构成日常主视图的一部分。
+   - `GoalCheck {agent, done, missing_count}`
+   - `Stall {seconds}` / `Error {code, message}` / `Heartbeat {claude_tokens, codex_tokens}` / `Note {message}`
+3. **Progress 面板 → Raw stream**（右栏）：实时 stdout / stderr 流。orchestrator
+   把每行包成 `RawLogLine { at, round, agent, phase, stream, line }` 经
+   `cccplayer://raw` Tauri 事件推到 UI，UI 侧维护 2000 行环形缓冲，按 stdout（cyan）
+   / stderr（红）分色。这是"为什么卡住 / 为什么 crashed" 的层；无结构事件时这里
+   也能看原始输出（例如 CLI 启动失败的 stderr 报错）。
 
-事件时间线与状态条是"产品态"，原始日志抽屉是"开发者态"——两层分离，保证默认
-视图不像 Terminal、需要时又能一键下钻到 Terminal。
+结构化事件 + 原始流 + 状态条**三层并存**：默认视图不像 Terminal（只看 Timeline 就
+够），但 CLI 启动失败等 edge case 能在同一屏看到 root cause，不必去翻磁盘
+`.cccplayer/transcripts/`。
 
 ### 6.2 首次启动 / 空白态
 
-应用第一次启动、或当前没有任何活动 Session 时，主区域显示一个简短欢迎页：
+应用第一次启动、或当前没有任何活动 Session 时，主区域就是 §6 里那张 Idle 态
+截图：folder 输入 + goal 输入 + preflight 行全部同时可见，**不走"欢迎页 → 输入
+页 → 开始"的多步向导**。preflight 在进入页面时异步跑、实时刷新；workdir 随用户
+输入 debounce 300ms 做 safety classify，结果显示为底部横幅（OK / soft_warn /
+strong_warn / blocked 四色）。
 
-```
-┌──────────────────────────────────────────────┐
-│  CCCPlayer                                   │
-│                                              │
-│  让 Claude Code 和 Codex 替你来回打磨代码      │
-│  直到目标达成。                                │
-│                                              │
-│  [  选择工作目录  ]                            │
-│                                              │
-│  Preflight                                   │
-│  ● Claude Code CLI    检查中…                │
-│  ● Codex CLI          检查中…                │
-│  ● Claude 登录态      待目录选定后再检测        │
-│  ● Codex 登录态       待目录选定后再检测        │
-└──────────────────────────────────────────────┘
-```
+Play 按钮的可点条件：
+- preflight 全绿（两个 CLI 都找到 + 都有 auto-approve flag）
+- workdir 非空且非 blocked
+- 目标非空且通过 §6.5 校验
 
-选定目录后：
-- 若目录里已有 `.cccplayer/session.json` → 进入"恢复已有 Session"视图（顶部显示
-  旧目标 + 旧状态 + 一键继续 / 归档新建）。
-- 否则 → 显示目标输入框，preflight 跑完且全绿才启用"开始"。
+任何一项不满足都灰显，hover 显示具体原因。选定 workdir 后的两种分支：
+- 若目录里已有 `.cccplayer/session.json` 且 `GOAL.md` 与当前输入一致 → 直接恢复
+  旧 Session（见 §7 决策树）。
+- 否则 → 新建 Session。
 
 ### 6.3 工作目录的切换
 
@@ -1070,6 +1116,12 @@ next_state rules:
 | 53 | CLI flapping 上限 | 最近 5 turn 内 retry≥3 → ERRORED | §16.8 |
 | 54 | 通知权限被拒 | 检测到即 banner 提示，不静默 | §16.10 |
 | 55 | session schema 前向兼容 | 大于当前最大版本即拒绝打开并提示升级 | §8 |
+| 56 | Finder 启动的 PATH 注入 | main.rs 启动时将 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.cargo/bin`、`~/.volta/bin`、`~/.bun/bin`、`~/.local/bin` 前插到 `PATH`。不然 Finder 启动的 .app 继承的是 macOS 默认 PATH（`/usr/bin:/bin:/usr/sbin:/sbin`），`#!/usr/bin/env node` 脚本（Codex）找不到 `node` 直接失败。[app_state] | §2、§16.2 |
+| 57 | Claude `-p` + stream-json 必须加 `--verbose` | Claude Code 2.x 强制要求三者同时出现，否则 `Error: When using --print, --output-format=stream-json requires --verbose` 立即退出。orchestrator 构造 args 时已加。 | §9 |
+| 58 | Codex 走 `exec` 子命令而非裸 prompt | Codex CLI 非交互式入口是 `codex exec <prompt>`。auto-approve flag 跟在顶层也能被 clap 路由到 `exec` 子命令上。 | §9 |
+| 59 | usage 解析兼容 Claude 嵌套 + Codex 明文 | `parse_usage_line` 同时认扁平 `{"type":"usage",…}`（fake CLI）和嵌套 `{"type":"assistant","message":{…,"usage":{…}}}`（真实 Claude）；Codex 走 `parse_codex_total_tokens` 扫 `tokens used\n<N>` 明文对。 | §16.7 |
+| 60 | Claude stream-json goal-check 文本抽取 | `extract_claude_text()` 从每行 `assistant.content[*].text` 和 `result.result` 拼回模型真实回复，再喂给 `parse_goal_check`。否则原始 stdout 的 JSON 外壳会让 `extract_json_block` 找不到可解析的 `{done,…}`。plain-text 输出走 fallback 不变。 | §16.3、§16.8 |
+| 61 | 原始日志事件通道 | orchestrator 多挂一个 `raw_sink: mpsc::UnboundedSender<RawLogLine>`，每行 stdout/stderr 附上 agent/phase/round 推到 `cccplayer://raw` Tauri 事件；UI 2000 行环形缓冲。 | §6.1 |
 
 ---
 
