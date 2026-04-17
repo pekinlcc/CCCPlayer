@@ -218,6 +218,30 @@ CCCPlayer 必须优雅处理工作目录的所有合理起始状态。**不假�
 浮提示"先停止当前 Session 再切换"。这避免编辑器一样的"打开新文件丢失改动"陷阱。
 Session 处于 DONE / ABANDONED / 未开始时可自由切换。
 
+### 6.4 单窗口策略 + 关窗 ≠ 退出
+
+CCCPlayer 是后台跑长任务的应用。窗口与进程语义必须明确：
+
+- **单主窗口**：只允许一个主窗口实例。Tauri 默认会在 dock 图标点击时打开新窗
+  口——必须拦截，让 dock 点击只激活已有窗口。需要换工作目录就在窗口内切换
+  （见 §6.3）。
+- **关窗（Cmd+W / 红绿灯红钮）= 隐藏窗口，进程继续**。Session 不受影响。
+  菜单栏图标保留入口，可随时唤回主窗。
+- **Cmd+Q / 菜单 Quit = 真正退出**：先弹"当前有 Session 在跑，退出会暂停所有
+  agent，确认？"；确认后走完整 cancel 协议，再退出。
+- 这是为了兑现"烧算力不烧用户时间"——用户随手关窗不能让几小时的工作白费。
+
+### 6.5 目标输入校验
+
+"开始"按钮只在以下条件全部满足时启用：
+- preflight 全绿（CLI 装好、登录、目录已选、auto-approve flag 可用）。
+- 目标文本去掉首尾空白后非空。
+- 目标文本长度 ≤ 10000 字符（超长极有可能是粘错了文档）。
+- 目标文本不全是 markdown 标点 / emoji（防纯空白带格式）。
+
+不通过时按钮灰显，旁边浮 tooltip 说明哪一项不满足。**不在用户点了"开始"才报错**
+——按钮的可点性本身就是反馈。
+
 ## 7. "开始"按钮的决策树
 
 这是产品的核心鲁棒性来源，必须在一处集中实现：
@@ -260,7 +284,12 @@ on_click_start(session):
 
 ## 8. 持久化与恢复
 
-每个 Session 在工作目录下维护 `.cccplayer/`：
+每个 Session 在工作目录下维护一个隐藏子目录 `.cccplayer/`，存放编排器的私有运行
+时状态。命名沿袭 `.git/`、`.vscode/`、`.claude/` 等"工具在用户项目里的私有数据"
+惯例——它**不是** CCCPlayer 产品自身的源代码，而是编排器在用户**任意工作目录**里
+为本次 Session 创建的状态目录。两个 agent 被禁止访问该目录（见 §17.0）。
+
+布局：
 
 ```
 .cccplayer/
@@ -284,6 +313,9 @@ on_click_start(session):
 `session.lock` 是 `flock(2)` 排他锁文件：
 - 应用启动并打算操作某个工作目录前，先尝试持锁。失败 → 弹窗 "另一个 CCCPlayer
   实例已经在使用这个目录"，禁止打开。
+- **加锁前先 `std::fs::canonicalize` 规范化路径**（解析 symlink、消解 `..`、转
+  绝对路径），用规范化后的路径作为锁键。否则 `~/proj` 与 `/Users/me/proj` 可能
+  各自拿到锁、共写同一目录。
 - 持锁文件里写入当前进程 pid + 进程启动时间（`start_boottime`）；下次任何实例
   启动时若发现锁存在但匹配的 pid+start_time 已不存在，视作残留锁可清理。
 - 仅匹配 pid 不够——pid 可被复用；必须 pid+start_time 双匹配，避免误杀新进程。
@@ -298,6 +330,16 @@ on_click_start(session):
 - **`.gitignore` 自动追加**：Session 创建时若工作目录根存在 `.git/`，自动在
   `.gitignore` 末尾追加 `.cccplayer/`（已存在则跳过）。事件流里通知用户做了这
   一步。这避免 `git add .` 把 GB 级 tar 包误提交。
+- **快照排除清单**（默认）：`node_modules/`、`target/`、`.venv/`、`venv/`、
+  `__pycache__/`、`.next/`、`dist/`、`build/`、`.tox/`、`.gradle/`、`.idea/`、
+  `.vscode/`、`.DS_Store`。这些是可重建的依赖/产物，每 Round 打包它们会让快照
+  从几 MB 涨到几 GB。设置里允许用户增删。**用户原始代码本身**（含上述目录里若
+  有用户手写文件）由 `round-00` 一次性完整快照，不受排除影响。
+- **磁盘空间预检**：每次 Round 起始打 snapshot 前，估算工作树体积 × 1.2 与剩余
+  空间对比；空间不足 → `PAUSED`，提示"磁盘剩余 X MB，无法创建本轮快照，请清理
+  后恢复"。不强行写半截文件。
+- **关键文件落盘 fsync**：`session.json`、`events.log`、`usage.json` 这三个状态
+  文件在每次更新后 `fsync(2)`，保证断电/强退时不会回到上一刻不一致的状态。
 
 恢复策略：
 - 应用启动时扫描选中目录下的 `.cccplayer/session.json` 还原状态机。
@@ -625,6 +667,7 @@ M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-j
 ```
 ~/Library/Application Support/CCCPlayer/
 ├── settings.json     # 全局设置：CLI 绝对路径、模型、心跳超时、Round 硬帽…
+├── cli-info.json     # CLI probe 缓存（版本、可用 flag）
 ├── prompts/          # 用户自定义 prompt 模板，覆盖内置默认
 │   ├── planning.md
 │   ├── implementing.md
@@ -633,6 +676,7 @@ M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-j
 │   └── goal-check.md
 └── logs/             # 应用自身（非 Session）日志
 ```
+- `settings.json` 必须含 `"schema_version": 1`，与 `session.json` 同样的迁移机制。
 - 设置面板对外是 GUI；底层就是这份 `settings.json`，可手工编辑。
 - `prompts/` 任一文件存在则覆盖内置默认；缺失则用应用包内默认。设置页有
   "重置该模板为默认"按钮和"重新加载"按钮（不需要重启）。
@@ -665,11 +709,65 @@ M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-j
 - 恢复时先做一次目录探活（写一个 `.cccplayer/.alive` 临时文件并删除），通过才进
   下一态。
 
+### 16.12 后台运行与 macOS App Nap 抑制
+
+应用经常在后台跑几小时——必须主动告诉 macOS"我在干正事"，否则系统会 throttle
+CPU、推迟定时器，引发心跳误判和子进程响应延迟。
+
+- 应用启动时调 `NSProcessInfo.processInfo.beginActivity(options:[.userInitiated, .latencyCritical], reason:"CCCPlayer is orchestrating long-running agents")`，
+  拿到一个 activity token。
+- 该 token 在有活跃 Session（RUNNING / PAUSED 任一中态）时持有；进 DONE /
+  ABANDONED / 无 Session 时释放。
+- Tauri v2 通过 `objc2` 或封装好的 `cocoa` crate 调即可。
+
+### 16.13 状态机的单写者保证
+
+多个事件源会请求改状态：用户点暂停 / 心跳超时 / Turn 结束 / Auth 失效 / 工作
+目录失联 / GOAL.md 删除 / PRD.md 冲突。并发改会乱。
+
+- 状态机背后是一个 mpsc channel + 单线程消费。所有状态变更命令封装为
+  `enum StateCommand { Pause, ResumeFromGoalCheck, TurnFinished(...), AuthFailed(...), … }`
+  发到 channel，由唯一的 reducer 串行处理。
+- harness、watchdog、UI command 全部走这个 channel，**不允许任何模块直接持有
+  `Mutex<State>` 写入**。
+- reducer 处理每条命令后产出新的 state + 一组 side-effect（比如"取消当前 turn"
+  "写 events.log"），side-effect 异步执行但不再回头改 state，除非通过新命令。
+
+### 16.14 CLI auto-approve flag 的探测与硬性依赖
+
+§16.10 把"传 auto-approve flag"作为产品命脉。这个 flag 由 CLI 厂商决定，可能
+随版本改名 / 受限 / 下架。必须把对它的依赖**显式探测、显式失败**：
+
+- preflight 阶段实跑一次 `claude --dangerously-skip-permissions --version`（或当
+  前确认的等效 flag），exit 0 且无相关错误才算通过。Codex 同理。
+- 不通过 → preflight 红灯，明示"当前 CLI 版本不支持无人值守模式（缺少
+  `<flag>`）。请升级 CLI 或参考文档配置"。
+- 探测结果记入 `.cccplayer/cli-info.json` + `~/Library/Application Support/CCCPlayer/cli-info.json`
+  双层缓存：每次启动只在 CLI 版本变了才重测。
+- 这条决策的副作用：**CLI 升级有破坏 CCCPlayer 的风险**。这是接受的代价；UI 在
+  CLI 升级被探测到后弹一次"已重新检测 CLI 能力"通知。
+
 ## 17. Prompt 模板（待你确认）
 
 下面五个 prompt 作为 M1 起点；全部以英文撰写（两个 CLI 对英文指令最稳），文件
 内部的固定段名若 PRD 指定为中文则保留中文。执行时由 harness 做模板填充（目录路
 径、Round 序号、上一版本号）。
+
+### 17.0 所有 prompt 共有的约束（实现时由 harness 自动拼接到每个 prompt 末尾）
+
+```text
+Hard constraints that override any other instruction:
+- Never read, write, list, or delete anything under {workdir}/.cccplayer/.
+  That hidden directory is the orchestrator's private state (snapshots,
+  session metadata, transcripts). Touching it can corrupt rollback and
+  recovery. If a tool would need to enter it, refuse and continue.
+- Never modify GOAL.md.
+- Never modify any earlier codex_review_v*.md file (only the highest-
+  numbered one is mutable, and only as each phase's prompt allows).
+- Every file write must be atomic: write to a temp file in the same
+  directory, fsync, then rename onto the final path.
+- All work must stay inside {workdir}. Do not touch files outside it.
+```
 
 ### 17.1 PLANNING（Claude Code）
 
@@ -915,6 +1013,18 @@ next_state rules:
 | 36 | 零遥测 | 产品级承诺，无开关 | §12 |
 | 37 | TCC 拒绝处理 | 引导到系统设置 + 重试按钮 | §12 |
 | 38 | Tauri capabilities | 最小可执行白名单 + 仅授权工作目录读写 + 通知；不开 shell 后门 | §14 |
+| 39 | 关窗 ≠ 退出 | 关窗仅隐藏，Cmd+Q 才退出且需确认 | §6.4 |
+| 40 | 单窗口策略 | 拦截 dock new window，目录切换在窗口内 | §6.4 |
+| 41 | App Nap 抑制 | `beginActivity(.userInitiated, .latencyCritical)` 持有 token | §16.12 |
+| 42 | `.cccplayer/` 隔离 | §17.0 共有约束禁止 agent 触碰；命名沿袭 `.git/` 惯例，与 CCCPlayer 产品本身无关 | §8、§17.0 |
+| 43 | CLI auto-approve flag 探测 | preflight 实跑验证，缺失即红灯 | §16.14 |
+| 44 | 路径规范化 | flock 前 `canonicalize`，防 symlink 绕过 | §8 |
+| 45 | 状态机单写者 | mpsc + 单线程 reducer；side-effect 不回写 state | §16.13 |
+| 46 | 目标输入校验 | 非空、≤10000 字、非纯空白；按钮禁用即反馈 | §6.5 |
+| 47 | 快照排除清单 | 默认排除 `node_modules` 等可重建目录 | §8 |
+| 48 | 磁盘空间预检 | snapshot 前估算空间不足即 PAUSED | §8 |
+| 49 | 关键文件 fsync | session.json / events.log / usage.json 落盘后 fsync | §8 |
+| 50 | settings.json schema_version | 与 session.json 同机制 | §16.10 |
 
 ---
 
