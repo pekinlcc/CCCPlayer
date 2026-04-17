@@ -10,6 +10,7 @@ pub mod prompt;
 pub mod redact;
 pub mod reducer;
 pub mod session;
+pub mod settings;
 pub mod snapshot;
 pub mod state;
 pub mod workdir;

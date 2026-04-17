@@ -5,6 +5,8 @@
 //! See PRD §5 state machine and §7 "开始"按钮决策树.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -21,6 +23,31 @@ use tokio::sync::{mpsc, watch};
 
 use crate::parsers::{parse_goal_check, parse_review};
 use crate::runner::{HarnessRunner, StreamEvent, TurnInput};
+
+/// External handle to pause or stop a running Orchestrator without holding
+/// the `Orchestrator` itself. Cloneable; all clones point at the same
+/// underlying atomic flag.
+#[derive(Clone)]
+pub struct CancelHandle {
+    cancel: Arc<AtomicBool>,
+    stop_not_pause: Arc<AtomicBool>,
+}
+
+impl CancelHandle {
+    /// Ask the orchestrator to stop after cancelling the current turn and
+    /// transition to ABANDONED.
+    pub fn stop(&self) {
+        self.stop_not_pause.store(true, Ordering::SeqCst);
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Ask the orchestrator to pause after cancelling the current turn and
+    /// transition to PAUSED (resumable).
+    pub fn pause(&self) {
+        self.stop_not_pause.store(false, Ordering::SeqCst);
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
 
 /// Configuration for the orchestrator — where the CLIs live, which flags to
 /// pass, stall threshold, etc. Populated from preflight + settings.
@@ -50,6 +77,12 @@ pub struct Orchestrator {
     prd_fingerprint: Option<FileFingerprint>,
     /// Same for `GOAL.md` — used to detect both deletion and edits.
     goal_fingerprint: Option<FileFingerprint>,
+    /// External signal for pause/stop: set to `true` by `AppState::pause()` or
+    /// `AppState::stop()`. Checked at the top of each `step()` and wired into
+    /// every turn via a `watch::Receiver`.
+    cancel: Arc<AtomicBool>,
+    /// `true` if `cancel` was a *stop* (abandon), `false` if it was a *pause*.
+    stop_not_pause: Arc<AtomicBool>,
 }
 
 impl Orchestrator {
@@ -73,7 +106,18 @@ impl Orchestrator {
             usage,
             prd_fingerprint: None,
             goal_fingerprint: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            stop_not_pause: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Returns a handle the caller (AppState) can use to trigger pause/stop
+    /// from outside the orchestrator task.
+    pub fn cancel_handle(&self) -> CancelHandle {
+        CancelHandle {
+            cancel: self.cancel.clone(),
+            stop_not_pause: self.stop_not_pause.clone(),
+        }
     }
 
     /// Create `round-00` snapshot if it doesn't exist yet, and emit the
@@ -121,6 +165,17 @@ impl Orchestrator {
     }
 
     async fn step(&mut self, events_tx: &mpsc::UnboundedSender<Event>) -> Result<()> {
+        // External cancel? Decide PAUSED vs ABANDONED and exit the loop.
+        if self.cancel.load(Ordering::SeqCst) {
+            if self.stop_not_pause.load(Ordering::SeqCst) {
+                let effs = self.reducer.handle(StateCommand::Stop);
+                self.apply_effects(effs, events_tx).await?;
+            } else {
+                let effs = self.reducer.handle(StateCommand::Pause);
+                self.apply_effects(effs, events_tx).await?;
+            }
+            return Ok(());
+        }
         // §16.5 / §16.11 pre-flight: GOAL.md must still exist, and if we have
         // a prior PRD.md fingerprint, make sure the file hasn't been edited
         // from under us. Either violation forces a PAUSED transition with a
@@ -357,7 +412,23 @@ impl Orchestrator {
         let _ = events_tx.send(Event::new(round, EventKind::AgentStarted { agent, phase }));
 
         let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(128);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        // Plumb the orchestrator-wide cancel atomic into a per-turn watch
+        // channel so the runner's select! can pick it up. We poll the atomic
+        // on an interval; cheap relative to the turn itself.
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let cancel_atomic = self.cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if cancel_atomic.load(Ordering::SeqCst) {
+                    let _ = cancel_tx.send(true);
+                    break;
+                }
+                if cancel_tx.is_closed() {
+                    break;
+                }
+            }
+        });
 
         let session_events_dir = self.session.transcripts_dir();
         std::fs::create_dir_all(&session_events_dir).ok();

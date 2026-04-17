@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use cccplayer_core::events::Event;
 use cccplayer_core::session::Session;
+use cccplayer_harness::orchestrator::CancelHandle;
 use cccplayer_harness::{Orchestrator, OrchestratorConfig};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex};
@@ -26,6 +27,7 @@ pub struct AppState {
 pub struct RunningSession {
     pub workdir: PathBuf,
     pub handle: JoinHandle<Result<()>>,
+    pub cancel: CancelHandle,
 }
 
 impl AppState {
@@ -66,6 +68,7 @@ impl AppState {
 
         let session = Session::open(&workdir).context("open session")?;
         let mut orch = Orchestrator::new(session, config)?;
+        let cancel = orch.cancel_handle();
         orch.ensure_initialized(goal.lines().next().unwrap_or(""))?;
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
@@ -77,17 +80,18 @@ impl AppState {
         });
 
         let handle = tokio::spawn(async move { orch.run(events_tx).await });
-        *guard = Some(RunningSession { workdir, handle });
+        *guard = Some(RunningSession {
+            workdir,
+            handle,
+            cancel,
+        });
         Ok(())
     }
 
     pub async fn pause(&self) -> Result<()> {
         let guard = self.running.lock().await;
         if let Some(rs) = guard.as_ref() {
-            // The orchestrator doesn't yet expose a pause channel in M1; the
-            // reducer has a Pause command, but we'd need to plumb a cancel
-            // sender through. Placeholder for M2.
-            drop(rs);
+            rs.cancel.pause();
         }
         Ok(())
     }
@@ -95,7 +99,9 @@ impl AppState {
     pub async fn stop(&self) -> Result<()> {
         let mut guard = self.running.lock().await;
         if let Some(rs) = guard.take() {
-            rs.handle.abort();
+            rs.cancel.stop();
+            // Don't abort: let the orchestrator unwind cleanly so it can
+            // write the final ABANDONED state to session.json.
         }
         Ok(())
     }

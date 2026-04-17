@@ -203,6 +203,55 @@ async fn missing_goal_causes_pause() {
     );
 }
 
+/// External stop() should transition the session to ABANDONED while leaving
+/// artifacts intact.
+#[tokio::test]
+async fn external_stop_transitions_to_abandoned() {
+    let workdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(workdir.path().join("GOAL.md"), "test goal\n").unwrap();
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = PathBuf::from(manifest).join("..").join("..");
+    let fake_claude = workspace_root
+        .join("target")
+        .join("debug")
+        .join("cccplayer-fake-claude");
+    let fake_codex = workspace_root
+        .join("target")
+        .join("debug")
+        .join("cccplayer-fake-codex");
+
+    let session = Session::open(workdir.path()).expect("open");
+    let cfg = OrchestratorConfig {
+        claude_path: fake_claude,
+        codex_path: fake_codex,
+        claude_auto_approve_flag: None,
+        codex_auto_approve_flag: None,
+        stall_threshold: Duration::from_secs(30),
+        fake_mode: true,
+    };
+    let mut orch = Orchestrator::new(session, cfg).expect("new");
+    let cancel = orch.cancel_handle();
+    orch.ensure_initialized("test").unwrap();
+
+    // Fire stop() *before* the loop starts so the first step() picks it up.
+    cancel.stop();
+
+    let (tx, _rx) = mpsc::unbounded_channel::<cccplayer_core::events::Event>();
+    orch.run(tx).await.expect("run");
+    drop(orch);
+
+    let session = Session::open(workdir.path()).expect("reopen");
+    let meta = cccplayer_core::persistence::load_session_meta(&session)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(meta.state, SessionState::Abandoned),
+        "expected ABANDONED after stop, got {:?}",
+        meta.state
+    );
+}
+
 /// Usage events from the stream-json output accumulate into usage.json.
 #[tokio::test]
 async fn usage_is_tracked_per_session() {

@@ -55,8 +55,8 @@ implementation location and a status. Three statuses:
 | §16.5 GOAL.md external-edit detection | Immutable: fail on any change | Done | Orchestrator `step()` fingerprints GOAL.md on first seen and compares on each subsequent turn; change triggers `ForcePause` |
 | §16.7 per-session token display | Sum stream-json usage events | Done | `runner::parse_usage_line` extracts `{type:usage, input_tokens, output_tokens}` lines; orchestrator aggregates into `UsageTotals` and persists `.cccplayer/usage.json`; `Heartbeat` events carry totals to the UI. Verified by `usage_is_tracked_per_session` e2e test |
 | §16.8 turn outcome classifier | 6 outcomes + priority order | Done | `runner::classify` |
-| §16.9 pause semantics | In-turn cancel+rollback, between-turn just record | Done (reducer) / Sketched (UI plumbing) | `Reducer::Pause` handles both; `AppState::pause` is a stub for M2 |
-| §16.10 app data dir | `~/Library/Application Support/CCCPlayer/` | Sketched | Path assumed in docs; no read/write yet (defaults used) |
+| §16.9 pause semantics | In-turn cancel+rollback, between-turn just record | Done | `Orchestrator::cancel_handle()` returns a `CancelHandle` with `pause()` / `stop()`; AppState uses it to drive PAUSED / ABANDONED transitions. Verified by `external_stop_transitions_to_abandoned` |
+| §16.10 app data dir | `~/Library/Application Support/CCCPlayer/` + settings.json with schema_version | Done | [`settings.rs`](crates/core/src/settings.rs) implements load/save, forward-compat refusal, and XDG fallback for Linux dev. Tests: `settings::tests::*` |
 | §16.10 prompt overrides | `prompts/*.md` files override built-ins | Done | `PromptSet::load` |
 | §16.10 auto-approve agent tool calls | Pass flag + scope via CLI arg | Done | `OrchestratorConfig.claude_auto_approve_flag` propagates to each turn |
 | §16.10 walk-away notification | Notify on DONE/ERRORED/PAUSED | Sketched | Reducer emits `NotifyDone` / `NotifyAttention` effect; wiring to `tauri-plugin-notification` is a one-liner M2 addition |
@@ -78,7 +78,7 @@ implementation location and a status. Three statuses:
 
 ## Test evidence
 
-- `cargo test --workspace` — 27 tests pass (14 core + 9 harness + 4 e2e).
+- `cargo test --workspace` — 31 tests pass (17 core + 9 harness + 5 e2e).
 - `full_loop_reaches_done` drives fake CLIs end-to-end through
   PLANNING → IMPLEMENTING → REVIEWING → GOAL-CHECK×2 → DONE and asserts
   `PRD.md`, `hello.txt`, `codex_review_v1.md` all exist and persisted
