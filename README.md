@@ -29,12 +29,28 @@ cargo test  --workspace
 cd ui && npm install && npm run build
 ```
 
-For the full desktop binary on macOS:
+### macOS `.app` bundle
+
+The full desktop binary **must be built on macOS** — Apple doesn't
+distribute the macOS SDK for other hosts, so there is no supported
+Linux → macOS cross-compile path. On a Mac:
 
 ```sh
-cd ui && npm install
-cd .. && cargo tauri dev   # or: cargo tauri build --features tauri
+# One-shot universal build:
+./scripts/build-macos.sh
+
+# Apple Silicon only (faster):
+./scripts/build-macos.sh --arch arm64
+
+# Live dev run (hot reload):
+./scripts/build-macos.sh --dev
 ```
+
+The script will install the `aarch64-apple-darwin` / `x86_64-apple-darwin`
+Rust targets, install `cargo-tauri` if missing, `npm ci` the frontend,
+and run `cargo tauri build --features tauri`. The resulting `.app` lands
+under `target/<triple>/release/bundle/macos/CCCPlayer.app` with a matching
+`.dmg` alongside.
 
 ## Architecture highlights
 
