@@ -128,8 +128,32 @@ Claude Code 负责设计与实现，Codex 负责评审，两者通过一组共�
 关键交互点：
 - **"开始"是幂等的**：无论当前 Session 是 CREATED / PAUSED / ERRORED / DONE，
   点下去都会先做一次"目标是否已达成"的检测再决定动作（见 §7）。
-- 事件流点击任意条目跳转到对应文件/日志。
-- 设置页：模型选择、每 Round 超时、最大 Round 数、自定义 prompt 模板。
+- 设置页：模型选择、每 Round 超时、最大 Round 数、自定义 prompt 模板、CLI 绝对路径。
+
+### 6.1 进度显示：三段式
+
+为了避免"长 turn 里 UI 看起来卡死"和"直接裸露 stdout 太吵"两个极端，运行中的
+主界面分为三个区域：
+
+1. **顶部状态条**：当前阶段（PLANNING/IMPLEMENTING/REVIEWING/REFINING/…）、
+   Round N、已耗时、最近一次心跳（从 stream-json 中拿到最新事件的时间戳）。
+2. **事件时间线（默认主视图）**：结构化事件流，不是 stdout 原文。数据源是两个 CLI
+   的 stream-json 输出（`claude --output-format stream-json`、Codex 对应模式），
+   我们解析后产出如下事件类型：
+   - `AgentStarted {agent, phase}`
+   - `FileEdited {path, added, removed}` / `FileCreated {path}` / `FileRead {path}`
+   - `ToolInvoked {name, summary}`（如 `cargo check`、`rg "TODO"`）
+   - `ReviewWritten {version, verdict, blocking_count}`
+   - `GoalCheck {agent, done, missing}`
+   - `Error {kind, message}`、`Heartbeat {token_usage}`
+   - `AgentFinished {agent, phase, duration}`
+   
+   每条事件可点开看对应的 transcript 片段。
+3. **原始日志抽屉**（右侧可折叠）：实时流 stdout+stderr，带搜索；默认收起，给
+   debug 使用，不构成日常主视图的一部分。
+
+事件时间线与状态条是"产品态"，原始日志抽屉是"开发者态"——两层分离，保证默认
+视图不像 Terminal、需要时又能一键下钻到 Terminal。
 
 ## 7. "开始"按钮的决策树
 
@@ -317,6 +341,272 @@ Round 循环的终止满足**任一**即可：
 | 3 | git 托管边界 | 不动用户 git，只用 tar+zstd 做快照（见 §8）。 |
 | 4 | "目标已达成"判定 | 两票一致制：Claude Code 与 Codex 的 Goal-Check 都返回 `done` 才通过（见 §7、§11）。 |
 | 5 | 并发 Session | 同时只允许一个活动 Session（见 §4）。 |
+
+## 16. 工程决策（补充）
+
+### 16.1 CLI 调用方式
+
+- 不起可见 Terminal 窗口。Tauri 的 Rust 后端用 `tokio::process::Command` 直接 spawn
+  `claude` / `codex` 子进程，stdin/stdout/stderr 走管道。
+- 默认走两个 CLI 的一次性执行模式（类似 `claude -p "<prompt>"`、`codex exec`），
+  并请求 stream-json 输出。**进程 exit 0 即本 turn 结束**，不自造心跳协议。
+- 若实测发现某命令路径强依赖 TTY，用 `portable-pty` crate 分配伪终端，外部仍无
+  可见窗口。
+- 启动时跑一次 "CLI probe"：调 `--version` / `--help`，把支持的 flag 与输出模式
+  固化到 `.cccplayer/cli-info.json`，后续调用据此选择参数——抵御 CLI 跨版本差异。
+
+### 16.2 macOS PATH 与 preflight
+
+- macOS GUI app **不继承** shell PATH，因此从 Finder 启动时 `/opt/homebrew/bin/claude`
+  默认找不到。启动时按下列顺序探测 CLI：
+  1. 用户在设置里填的绝对路径（最高优先）
+  2. `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`
+  3. 进程继承的 `PATH`
+- Preflight 面板在"开始"按钮旁给出逐项状态，**禁用开始按钮直到全部通过**：
+
+  ```
+  ● Claude Code CLI     未找到，请安装：<链接>
+  ● Codex CLI           已安装 ✓
+  ● Claude 登录状态     未登录，请在 Terminal 运行：claude login
+  ● Codex 登录状态      已登录 ✓
+  ● 工作目录            未选择
+  ```
+
+- **不代替用户登录**。CCCPlayer 不持有 API key、不弹密码框、不处理 OAuth 回调；
+  一律指引用户在真实 Terminal 里跑 `claude login` / `codex login`，登录态通过 CLI
+  自己在 `~/.claude`、`~/.codex` 下的 token 文件复用。
+- **运行中失效的处理**：harness 在 stderr 中匹配常见认证失败字样 / HTTP 401，立即
+  进入 `PAUSED` 状态并展示"请在 Terminal 运行 `<登录命令>` 后点恢复"。
+
+### 16.3 输出解析鲁棒性
+
+- Goal-Check 与 Verdict 要求 agent 以围栏代码块输出结构化数据。
+- 解析器宽容：扫全文取第一个合法 JSON / YAML 块；找不到或解析失败时，**自动
+  重试一次**，追问 "your last reply did not contain a valid JSON block, output
+  only the JSON block this time"。两次都失败 → 本 turn 计入失败，进入 `ERRORED`
+  等用户介入。
+
+### 16.4 预算上限
+
+- 单 turn wall-clock 30 分钟硬超时；超时走 cancel 协议（SIGINT → SIGTERM → SIGKILL）。
+- Session 默认上限：20 Round 或累计 4 小时，两者先到即进 `ERRORED`。
+- 这些都在设置页可改，但设有非零下限，避免一键跑失控。
+- 不做 token 级别的硬预算：CLI 层面不暴露此控制。事件流里展示 CLI 回报的 token
+  用量供用户自己判断。
+
+### 16.5 原子写与回滚
+
+- 所有 prompt 强制 agent 以 "写 tmp → rename" 完成文件写入。
+- 每个 Round 启动前对工作树做 `tar + zstd` 快照落 `.cccplayer/snapshots/`。
+- turn 被取消或崩溃时，harness 将该 turn 的所有文件改动回滚到本 Round 起始快照
+  （不回滚到更早，避免损失已确认的进度）。
+
+### 16.6 模型与推理参数
+
+- 设置页暴露两个选择：
+  - Claude 模型：默认 `claude-opus-4-7`（最强）。
+  - Codex reasoning level：默认 `high`。
+- 通过 CLI flag 传入，不劫持 CLI 自身的配置文件。
+
+## 17. Prompt 模板（待你确认）
+
+下面五个 prompt 作为 M1 起点；全部以英文撰写（两个 CLI 对英文指令最稳），文件
+内部的固定段名若 PRD 指定为中文则保留中文。执行时由 harness 做模板填充（目录路
+径、Round 序号、上一版本号）。
+
+### 17.1 PLANNING（Claude Code）
+
+```text
+You are working in {workdir}. First read GOAL.md — that is the user's
+immutable goal for this session; never modify it.
+
+Task for this turn: produce or update PRD.md so it fully specifies how to
+deliver the goal. PRD.md is the single design document; later turns will
+implement code against it.
+
+Required top-level headings (in order):
+1. Goal            — verbatim restatement of GOAL.md, one sentence.
+2. Scope           — what is in.
+3. Non-goals       — what is explicitly out.
+4. Design          — architecture, key modules, file layout, data model,
+                     external dependencies.
+5. Milestones      — ordered checklist of shippable increments.
+6. Open Questions  — anything you could not decide; empty list is fine.
+
+If PRD.md already exists, revise it in place; preserve prior decisions unless
+newly contradicted. If codex_review_v*.md files exist, read the highest-
+numbered one and fold any PRD-level feedback into this revision.
+
+Write PRD.md atomically (temp file + rename). Do not modify any other file
+in this turn.
+
+When done, print one line to stdout:
+    PLANNING done: <N> sections, +<added>/-<removed> lines
+```
+
+### 17.2 IMPLEMENTING（Claude Code）
+
+```text
+You are working in {workdir}. GOAL.md is the user's goal (read-only). PRD.md
+is the design you must follow.
+
+Task for this turn: make concrete, working code changes that advance the
+next unchecked milestone in PRD.md. Do NOT reopen PRD-level decisions in
+this turn; if you genuinely must, stop after appending a note under
+"Open Questions" in PRD.md.
+
+Rules:
+- Favor small, compilable, testable increments over large refactors.
+- Add tests when the milestone implies them.
+- Run the project's build / test command if one exists; report its result.
+- Never touch GOAL.md or any codex_review_v*.md file.
+- Every file write must be atomic (temp file + rename).
+
+When done, print to stdout:
+    IMPLEMENTING done: <milestone title>
+    files: <comma-separated paths>
+    build: <ok | failed | n/a>   tests: <passed/total | n/a>
+```
+
+### 17.3 REFINING（Claude Code）
+
+```text
+You are working in {workdir}. Read, in order:
+  1. GOAL.md (read-only).
+  2. PRD.md.
+  3. codex_review_v{N}.md — the highest-numbered review file.
+
+That review ends with a "## Verdict" section listing blocking and optional
+non_blocking items.
+
+Task for this turn:
+
+A. Address every blocking item. For each, either fix it (in code and/or
+   PRD.md) or reject it with a specific technical reason.
+
+B. Consider non_blocking items; act on them only when clearly beneficial.
+
+C. Append (do not overwrite) a "## Claude Code 回应" section to the SAME
+   codex_review_v{N}.md file, with one subsection per blocking item:
+
+       ### <verbatim blocking item title>
+       - status: accepted | partial | rejected
+       - action: <what changed, with file paths>   (omit if rejected)
+       - reason: <why this resolves the item, or why rejected>
+
+Rules:
+- Never modify earlier codex_review_v*.md files.
+- Never edit GOAL.md.
+- All file writes must be atomic.
+
+When done, print to stdout:
+    REFINING done on v{N}: accepted <X>, partial <Y>, rejected <Z>
+    files touched: <comma-separated paths>
+```
+
+### 17.4 REVIEWING（Codex）
+
+```text
+You are working in {workdir} as an independent reviewer. Read:
+  1. GOAL.md — the immutable user goal.
+  2. PRD.md — the current design.
+  3. The working tree source files.
+  4. All prior codex_review_v*.md files — do not repeat points already
+     marked "accepted" in their "## Claude Code 回应" sections unless they
+     have since regressed.
+
+Pick N = max existing version + 1 (or 1 if none). Create
+codex_review_v{N}.md with exactly this structure:
+
+    # Codex Review v{N}
+    date: <YYYY-MM-DD>
+    goal: <one-line restatement of GOAL.md>
+
+    ## Summary
+    <2-4 sentences: what was built, what is missing or risky>
+
+    ## Strengths
+    <bullets; skip section if none>
+
+    ## Findings
+    ### <short finding title>
+    - severity: blocking | non_blocking
+    - where: <file:line or "design-level">
+    - detail: <one paragraph>
+    - suggestion: <concrete change>
+    (repeat per finding)
+
+    ## Verdict
+    - status: approved | changes_requested | blocked
+    - blocking:
+      - <verbatim titles of blocking findings, one per line; empty list
+         if none>
+    - non_blocking:
+      - <verbatim titles of non_blocking findings>
+
+Rules:
+- Modify no file other than your new codex_review_v{N}.md.
+- `status: approved` is only correct when the blocking list is empty.
+- Write the file atomically.
+
+When done, print to stdout:
+    REVIEW done: v{N}, verdict <status>, blocking <count>
+```
+
+### 17.5 GOAL-CHECK（Claude Code 与 Codex 各一次，只读）
+
+```text
+You are performing a READ-ONLY evaluation. Do not edit any file. Do not run
+any command that mutates state beyond reads.
+
+Read:
+  1. GOAL.md.
+  2. PRD.md, if present.
+  3. The highest-numbered codex_review_v*.md, if any.
+  4. The working tree file list and a concise summary of recent changes.
+
+Decide whether the user's goal in GOAL.md is fully delivered by the current
+working tree. Err on the strict side: if any part of the goal is incomplete,
+untested, or unverifiable, mark it not done.
+
+Output exactly one fenced JSON block and nothing else outside it:
+
+    ```json
+    {
+      "done": true | false,
+      "missing": ["<short items>"],
+      "next_state": "DONE" | "PLANNING" | "IMPLEMENTING" | "REFINING",
+      "rationale": "<one sentence>"
+    }
+    ```
+
+next_state rules:
+- "DONE" iff done=true.
+- "PLANNING" if PRD.md is missing or materially inconsistent with GOAL.md.
+- "REFINING" if the latest codex_review_v*.md Verdict has unresolved
+  blocking items.
+- "IMPLEMENTING" otherwise.
+```
+
+---
+
+## 18. 决策记录（累计）
+
+| # | 问题 | 决策 | 见 |
+| --- | --- | --- | --- |
+| 1 | 技术栈 | Tauri v2 + Rust + React/TS | §14 |
+| 2 | 目标如何传递给 agent | 工作目录下 `GOAL.md` | §9.3 |
+| 3 | git 托管边界 | 不动用户 git，只用 tar+zstd 快照 | §8 |
+| 4 | "目标已达成"判定 | 双方 Goal-Check 都 `done=true` 才通过 | §7、§11 |
+| 5 | 并发 Session | 同时仅一个活动 Session | §4 |
+| 6 | CLI 调用方式 | 直接 spawn + stream-json，必要时 PTY 兜底 | §16.1 |
+| 7 | 登录态 | 依赖 CLI 自有 token；preflight 引导，不代劳 | §16.2 |
+| 8 | PATH 陷阱 | 固定路径探测 + 用户可填绝对路径 | §16.2 |
+| 9 | Goal-Check 解析 | 围栏 JSON + 宽容解析 + 单次重试 | §16.3 |
+| 10 | 预算 | 单 turn 30 分钟、Session 20 Round/4 小时 | §16.4 |
+| 11 | 原子写与回滚 | prompt 强制 tmp+rename，turn 取消回滚到 Round 起始快照 | §16.5 |
+| 12 | 模型 | 默认 Claude Opus 4.7 + Codex reasoning=high | §16.6 |
+| 13 | 进度显示 | 状态条 + 事件时间线 + 原始日志抽屉 | §6.1 |
 
 ---
 
