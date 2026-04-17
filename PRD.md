@@ -45,8 +45,8 @@ Claude Code 负责设计与实现，Codex 负责评审，两者通过一组共�
 
 | 术语 | 含义 |
 | --- | --- |
-| Goal | 用户输入的自然语言目标（不可变，除非新建会话）。 |
-| Session | 一次"目标→完成"的端到端过程，对应一个工作目录 + 一份持久化状态。 |
+| Goal | 用户输入的自然语言目标。**写入工作目录下的 `GOAL.md`**，Claude Code 与 Codex 都直接读它，不再通过 prompt 注入。Session 进行中不可编辑；要改目标需新建 Session。 |
+| Session | 一次"目标→完成"的端到端过程，对应一个工作目录 + 一份持久化状态。**应用同一时刻仅支持一个活动 Session**，避免对同一工作目录的并发写入与 CLI 配额争抢。 |
 | Round | 一轮"实现→评审"循环，递增整数 `n`，对应一份 `codex_review_v{n}.md`。 |
 | Turn | Round 内的一次 agent 调用（实现 turn 或评审 turn）。 |
 | Verdict | Codex 在评审末尾给出的结构化判定：`approved` / `changes_requested` / `blocked`。 |
@@ -151,9 +151,10 @@ on_click_start(session):
   resume_loop()
 ```
 
-"目标是否已达成"的判断统一走一个**只读 Claude Code 调用**，输入是
-`Goal + PRD.md + 最新 codex_review_v{n}.md + 工作树 diff 摘要`，输出
-结构化 JSON：
+"目标是否已达成"的判断走**两票一致制**：Claude Code 与 Codex 各做一次只读评估，
+**两边都返回 `done=true` 才算达成**，任一方说没完成就继续。输入都是
+`GOAL.md + PRD.md + 最新 codex_review_v{n}.md + 工作树文件清单/diff 摘要`，
+输出结构化 JSON：
 
 ```json
 {
@@ -163,24 +164,34 @@ on_click_start(session):
 }
 ```
 
+两边判定分歧时的处理：
+- Claude 说 done、Codex 说未完成 → 按 Codex 的 `missing` 进 `REFINING`。
+- Claude 说未完成、Codex 说 done → 按 Claude 的 `missing` 进 `REFINING`。
+- 两边都判 done → 进 `DONE`。
+- 若分歧在**同一 Round**内连续出现 3 次且 missing 列表稳定不变 → 判定"震荡"，
+  进入 `ERRORED`，让用户介入（见 §11）。
+
 ## 8. 持久化与恢复
 
 每个 Session 在工作目录下维护 `.cccplayer/`：
 
 ```
 .cccplayer/
-├── session.json          # Goal、状态机、Round 计数、时间戳
+├── session.json          # 状态机、Round 计数、时间戳（Goal 不在这里，见下）
 ├── events.log            # 追加式事件流（事件流 UI 的数据源）
 ├── transcripts/
 │   ├── round-01-impl.txt
 │   ├── round-01-review.txt
 │   └── …
 └── snapshots/
-    └── round-01/         # git stash 或轻量 tar，用于快速回滚
+    └── round-01.tar.zst  # 每 Round 开始前对工作树打包（排除 .cccplayer 自身）
 ```
 
-工作目录本体由 CCCPlayer 托管的 `git` 仓库自动提交（每个 Round 一次 commit，
-message 形如 `cccplayer: round 3 implement`）。
+**不动用户的 git**：工作目录被视为一个普通本地文件夹。
+- 如果用户的目录恰好是 git 仓库，CCCPlayer 不调用 `git commit` / `git stash`，
+  也不创建分支，避免污染用户的历史。
+- 快照一律用 `tar + zstd` 落在 `.cccplayer/snapshots/` 下；回滚就是解压覆盖。
+- 用户想把 CCCPlayer 的中间产物版本化，自己决定是否把 `.cccplayer/` 加入 `.gitignore`。
 
 恢复策略：
 - 应用启动时扫描选中目录下的 `.cccplayer/session.json` 还原状态机。
@@ -209,16 +220,26 @@ interface Harness {
 
 | 阶段 | 输入 | 输出 |
 | --- | --- | --- |
-| PLANNING | Goal | 新建或更新 `PRD.md` |
-| IMPLEMENTING | Goal、`PRD.md` | 代码改动（由 Claude Code 直接写盘） |
+| PLANNING | `GOAL.md` | 新建或更新 `PRD.md` |
+| IMPLEMENTING | `GOAL.md`、`PRD.md` | 代码改动（由 Claude Code 直接写盘） |
 | REFINING | `codex_review_v{n}.md` | 在同一文件尾部追加 `## Claude Code 回应` 段，并修改代码 |
-| GOAL-CHECK（只读） | Goal、PRD、最新评审、diff 摘要 | 结构化 JSON |
+| GOAL-CHECK（只读） | `GOAL.md`、PRD、最新评审、diff 摘要 | 结构化 JSON |
 
 ### 9.2 Codex 的职责
 
 | 阶段 | 输入 | 输出 |
 | --- | --- | --- |
-| REVIEWING | Goal、`PRD.md`、工作树 | 新建 `codex_review_v{n+1}.md`，末尾必须含 verdict 段 |
+| REVIEWING | `GOAL.md`、`PRD.md`、工作树 | 新建 `codex_review_v{n+1}.md`，末尾必须含 verdict 段 |
+| GOAL-CHECK（只读） | `GOAL.md`、PRD、最新评审、diff 摘要 | 结构化 JSON，与 Claude Code 的输出格式一致 |
+
+### 9.3 GOAL.md 的约定
+
+- 位置：工作目录根下的 `GOAL.md`。
+- 内容：用户原样输入的自然语言目标，外加应用自动追加的只读头部（创建时间、
+  Session ID）。
+- 生命周期：创建 Session 时写入，之后对所有 agent **只读**。用户想改目标，应用
+  引导新建 Session。
+- 两个 agent 的 prompt 模板都以"第一步请读 `GOAL.md`"开头，保证一致理解。
 
 Verdict 段格式（由 prompt 约束，解析器宽容）：
 
@@ -246,10 +267,13 @@ Verdict 段格式（由 prompt 约束，解析器宽容）：
 
 Round 循环的终止满足**任一**即可：
 
-1. 最近一轮 Codex verdict == `approved` **且** Goal-Check 判定 `done == true`。
+1. 最近一轮 Codex verdict == `approved` **且** Claude Code 与 Codex 的 Goal-Check
+   **都**返回 `done == true`（两票一致）。
 2. 达到最大 Round 数（默认 20，可配置），进入 `ERRORED`，等待用户决策。
 3. 用户显式暂停 / 停止。
 4. 连续 2 轮评审内容高度相似（haiku 做相似度判断）→ 判定"震荡"，进入 `ERRORED`。
+5. Goal-Check 双方在同一 Round 内分歧 3 次且 missing 列表稳定不变 → "震荡"，
+   进入 `ERRORED`。
 
 ## 12. 安全与权限
 
@@ -265,20 +289,36 @@ Round 循环的终止满足**任一**即可：
 - **M2 可用性（+2 周）**：暂停 / 恢复、Goal-Check 决策树、震荡检测、prompt 模板编辑。
 - **M3 打磨（+2 周）**：多 Session 管理、模型/参数配置、事件流富展示、签名打包分发。
 
-## 14. 待回答的问题（Open Questions）
+## 14. 技术栈（已决策）
 
-1. **技术栈选型**：SwiftUI 原生 vs Tauri/Electron？原生体验更好但与 Node/Rust 生态的
-   harness 实现要多一层 bridge。
-2. **Claude Code 如何"读取用户目标"**：作为 prompt 注入，还是写成工作目录下的
-   `GOAL.md`？倾向后者——更透明、便于 Codex 同样读取。
-3. **Git 托管边界**：如果工作目录已经是用户的 git 仓库，CCCPlayer 的自动 commit
-   如何与用户自己的提交共存？倾向"另建一个 `cccplayer/*` 分支线"，或完全只用
-   stash + 快照文件，不动用户的主分支。
-4. **"目标已达成"的判定误差**：Claude Code 自评容易高估。是否引入 Codex 做第二
-   意见？（会多一次 CLI 调用，成本上升。）
-5. **并发 Session**：MVP 阶段明确只支持一个活动 Session，避免并发争抢同一工作
-   目录与模型配额。
+**Tauri v2 + Rust 后端 + React/TypeScript 前端**。
+
+选型理由：
+- 本项目最难的部分是**子进程编排**（长时运行的 `claude`/`codex`、流式 stdout、
+  可取消、崩溃恢复、文件快照），Rust + `tokio` 是这类工作的最佳组合。
+- Tauri 打包出的是单 binary、无运行时依赖，macOS 签名 / 公证流程干净。
+- UI 是"输入框 + 开始按钮 + 事件流"，Web 栈实现最快；后续扩展设置页、
+  prompt 模板编辑器、diff 查看器也直接用现成生态。
+- 相比 SwiftUI：不绑定单一平台，且 Swift 写 async 子进程管理偏啰嗦。
+- 相比 Electron：体积小一个数量级，冷启动更快。
+
+模块划分（先登记，不在此 PRD 展开实现）：
+- `cccplayer-core`（Rust crate）：状态机、持久化、harness 抽象、snapshot。
+- `cccplayer-harness-claude` / `cccplayer-harness-codex`（Rust）：CLI 封装。
+- `cccplayer-ui`（React）：三要素 UI + 事件流订阅 + 设置页。
+- `cccplayer-app`（Tauri）：把以上三者粘起来，加 macOS 菜单、TCC 权限请求。
+
+## 15. 已关闭的问题（决策记录）
+
+| # | 问题 | 决策 |
+| --- | --- | --- |
+| 1 | 技术栈 | Tauri v2 + Rust + React/TS（见 §14）。 |
+| 2 | 目标如何传递给 agent | 工作目录下 `GOAL.md`，两个 agent 都读它（见 §9.3）。 |
+| 3 | git 托管边界 | 不动用户 git，只用 tar+zstd 做快照（见 §8）。 |
+| 4 | "目标已达成"判定 | 两票一致制：Claude Code 与 Codex 的 Goal-Check 都返回 `done` 才通过（见 §7、§11）。 |
+| 5 | 并发 Session | 同时只允许一个活动 Session（见 §4）。 |
 
 ---
 
-*下一步建议：先就 §14 里的 1、3、4 做决策，再进入 M1 的工程拆分。*
+*下一步：进入 M1 的工程拆分——仓库骨架、状态机骨架、harness 接口与一个能跑通
+"PLANNING → IMPLEMENTING → REVIEWING"最小回路的 demo。*
