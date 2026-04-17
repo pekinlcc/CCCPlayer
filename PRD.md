@@ -308,7 +308,9 @@ on_click_start(session):
 ```
 
 `session.json` 必须含 `"schema_version": 1` 字段。后续 PRD 演进改字段时按 version
-做迁移，不在此 PRD 展开迁移脚本。
+做迁移，不在此 PRD 展开迁移脚本。**前向兼容**：若读到的 `schema_version` 大于
+当前应用支持的最大版本，直接拒绝打开并提示"该 Session 由更新版本的 CCCPlayer 创建，
+请升级"。比静默错误强得多。
 
 `session.lock` 是 `flock(2)` 排他锁文件：
 - 应用启动并打算操作某个工作目录前，先尝试持锁。失败 → 弹窗 "另一个 CCCPlayer
@@ -340,6 +342,8 @@ on_click_start(session):
   后恢复"。不强行写半截文件。
 - **关键文件落盘 fsync**：`session.json`、`events.log`、`usage.json` 这三个状态
   文件在每次更新后 `fsync(2)`，保证断电/强退时不会回到上一刻不一致的状态。
+- **快照本身原子化**：tar 输出先写 `round-NN.tar.zst.tmp`，`fsync` 后 `rename` 为
+  正式名。掉电留半个 tar 比没快照更糟（回滚会爆）。
 
 恢复策略：
 - 应用启动时扫描选中目录下的 `.cccplayer/session.json` 还原状态机。
@@ -633,6 +637,7 @@ M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-j
 | `output_malformed` | exit 0 但产出物缺关键段 / 关键文件缺失或空 | 走 §16.3 的 retry-with-clarification，最多 1 次；再不行 → `ERRORED` |
 | `stalled` | 心跳超时（见 §16.4） | 自动 cancel + retry 1 次；再卡 → `ERRORED` |
 | `crashed` | 非零 exit 且非认证错误 | retry 1 次；再失败 → `ERRORED` |
+| `flapping` | 同一 CLI 在最近 5 个 turn 里 retry ≥ 3 次 | 不再 retry → `ERRORED`，提示 CLI 可能不稳定，让用户介入 |
 | `auth_failed` | stderr 命中认证模式 | 不 retry → `PAUSED`，引导用户登录 |
 | `refused` | exit 0 + 工作树无文件改动 + 输出命中拒绝关键词（"I can't help"、"I won't"、"unable to"、"refuse" 等，全词或开头匹配） | 不 retry → `ERRORED`，提示用户修改目标 |
 
@@ -698,6 +703,9 @@ M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-j
   macOS 系统通知（`tauri-plugin-notification`）。
 - 通知点击后跳回应用主窗。
 - 设置里可关闭。
+- **权限被拒检测**：首次发通知时 macOS 会请求权限。检测到拒绝 → UI 顶部挂一行
+  banner "系统通知权限被拒，DONE 时不会通知；可在 系统设置 → 通知 → CCCPlayer
+  中开启"。不静默失败。
 
 ### 16.11 工作目录失联
 
@@ -733,7 +741,39 @@ CPU、推迟定时器，引发心跳误判和子进程响应延迟。
 - reducer 处理每条命令后产出新的 state + 一组 side-effect（比如"取消当前 turn"
   "写 events.log"），side-effect 异步执行但不再回头改 state，除非通过新命令。
 
-### 16.14 CLI auto-approve flag 的探测与硬性依赖
+### 16.14 工作目录安全性（黑白名单）
+
+§16.10 的 auto-approve 让 agent 在工作目录范围内自由读写、跑 shell 命令。这条
+设计的安全前提是"用户选了一个合理的工作目录"。如果用户把 workdir 选成 `~`，
+"限定到 workdir 内"就失去意义——agent 一个 `rm -rf .` 就能毁掉家目录。
+
+选目录时按三档处理：
+
+**A. 黑名单（直接拒绝）**：
+```
+/、/Users、/System、/Library、/Applications、/private、/var、/etc、/bin、/sbin、
+/tmp、/Volumes（根，不含子卷）、/usr、/opt、/dev、/cores
+```
+拒绝时弹窗说明"这是系统关键路径，CCCPlayer 不允许在此运行 agent"。
+
+**B. 强警告（必须二次确认 + 输入目录绝对路径匹配才放行）**：
+```
+~、~/、~/Documents、~/Desktop、~/Downloads、~/Library、~/.ssh 上级、~/.aws 上级、
+任何包含 ~/Library/Application Support/CCCPlayer 的路径（防止与本应用数据目录重叠）
+```
+弹窗文案明示风险："你选的目录包含个人/敏感文件。CCCPlayer 会让两个 agent 在
+此目录下自动执行命令——可能导致**这些文件被修改或删除**。请输入目录绝对路径
+确认你确实想这样做。"
+
+**C. 软警告（提示 + 一键继续）**：
+- 工作目录体积估计 > 10 GB，或文件数 > 100k；
+- 工作目录或其子树检测到 `.ssh/`、`*.pem`、`*.key`、`.env`、`credentials*`、
+  `.aws/`、`.gnupg/` 等敏感模式；
+- 工作目录是 git 仓库且有未提交的本地改动（agent 可能覆盖未保存工作）。
+
+提示用一行 banner 显示，不阻断；用户点"继续"或"取消"。
+
+### 16.15 CLI auto-approve flag 的探测与硬性依赖
 
 §16.10 把"传 auto-approve flag"作为产品命脉。这个 flag 由 CLI 厂商决定，可能
 随版本改名 / 受限 / 下架。必须把对它的依赖**显式探测、显式失败**：
@@ -1025,6 +1065,11 @@ next_state rules:
 | 48 | 磁盘空间预检 | snapshot 前估算空间不足即 PAUSED | §8 |
 | 49 | 关键文件 fsync | session.json / events.log / usage.json 落盘后 fsync | §8 |
 | 50 | settings.json schema_version | 与 session.json 同机制 | §16.10 |
+| 51 | 工作目录黑白名单 | 黑名单系统目录拒选；强警告家目录类；软警告大目录/敏感文件 | §16.14 |
+| 52 | snapshot tar 原子写 | `.tmp` + fsync + rename，避免半个 tar | §8 |
+| 53 | CLI flapping 上限 | 最近 5 turn 内 retry≥3 → ERRORED | §16.8 |
+| 54 | 通知权限被拒 | 检测到即 banner 提示，不静默 | §16.10 |
+| 55 | session schema 前向兼容 | 大于当前最大版本即拒绝打开并提示升级 | §8 |
 
 ---
 
