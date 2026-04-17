@@ -3,3 +3,6 @@ target/
 ui/dist/
 .DS_Store
 .cccplayer/
+ui/tsconfig*.tsbuildinfo
+ui/vite.config.d.ts
+ui/vite.config.js

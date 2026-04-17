@@ -48,7 +48,7 @@ implementation location and a status. Three statuses:
 | §16.1 child lifecycle | setsid + kill_on_drop + (pid, start_boottime) | Done | `pre_exec` setsid, `kill_on_drop(true)`, record written to `ChildProcessRecord` |
 | §16.2 PATH probing | brew / local / home / $PATH in order | Done | `preflight::default_cli_search_paths` |
 | §16.2 both CLIs required | No single-agent downgrade | Done | `run_preflight` only `all_ok` when both work |
-| §16.3 tolerant JSON parser + retry | Fenced block + bare object | Done | `parsers::extract_json_block` (retry-once plumbing is the app_state / reducer responsibility; currently fails fast → output_malformed → single reducer retry path) |
+| §16.3 tolerant JSON parser + retry | Fenced block + bare object + retry-once | Done | `parsers::extract_json_block`; reducer `turn_retries` counter retries `output_malformed` / `stalled` / `crashed` exactly once before ERRORED — covered by `reducer::tests::output_malformed_retries_once_then_errored` |
 | §16.4 stall detection + CLOCK_MONOTONIC + wake grace | Monotonic clock pauses during sleep | Done | `stall.rs` uses `clock_gettime(CLOCK_MONOTONIC)`; `wake_grace()` exposed for the macOS wake notification callback |
 | §16.5 atomic writes + external edit guard | mtime+sha256 compare before overwrite | Done (fingerprint) / Sketched (guard) | `persistence::fingerprint`; guard-on-write is wired into prompt rules and the planner will not clobber if fingerprint differs; the user-facing 3-way dialog is a UI M2 feature |
 | §16.5 GOAL.md deletion detection | Re-read each turn | Done | Each turn-start snapshot check via orchestrator reads GOAL.md when rendering prompts |
@@ -77,9 +77,14 @@ implementation location and a status. Three statuses:
 
 ## Test evidence
 
-- `cargo test --workspace` — 22 tests pass (12 core + 9 harness + 1 e2e).
+- `cargo test --workspace` — 25 tests pass (14 core + 9 harness + 2 e2e).
 - `full_loop_reaches_done` drives fake CLIs end-to-end through
   PLANNING → IMPLEMENTING → REVIEWING → GOAL-CHECK×2 → DONE and asserts
   `PRD.md`, `hello.txt`, `codex_review_v1.md` all exist and persisted
   state is `SessionState::Done`.
+- `refining_loop_reaches_done` drives the full PLANNING → IMPLEMENTING →
+  REVIEWING (changes_requested, v1) → REFINING → REVIEWING (approved, v2)
+  → GOAL-CHECK×2 → DONE path and asserts both review versions exist.
+- `reducer::tests::output_malformed_retries_once_then_errored` proves
+  §16.3 retry-once behavior.
 - `npm run build` produces the React bundle; `npm run typecheck` clean.

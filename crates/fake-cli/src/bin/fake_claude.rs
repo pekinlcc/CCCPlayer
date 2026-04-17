@@ -70,12 +70,30 @@ fn do_planning(workdir: &std::path::Path) -> anyhow::Result<()> {
 
 fn do_implementing(workdir: &std::path::Path) -> anyhow::Result<()> {
     lib::emit("agent_started", "implementing");
-    lib::atomic_write(&workdir.join("hello.txt"), "hello from fake-claude\n")?;
-    lib::emit("file_created", "hello.txt");
+    // If the test asked for the "first-round fails, refining fixes it"
+    // pattern, leave hello.txt unwritten this turn so Codex will issue a
+    // changes_requested verdict.
+    // Read the force-changes flag from either an env var or a workdir-local
+    // marker file (`.fake-force-changes`). The file-based path is robust
+    // against parallel-test env-var pollution.
+    let force_env = std::env::var("CCCPLAYER_FAKE_FORCE_CHANGES").is_ok();
+    let force_file = workdir.join(".fake-force-changes").exists();
+    let forcing_changes = (force_env || force_file) && !workdir.join(".fake-refined").exists();
+    if forcing_changes {
+        // Emit *some* artifact so the turn passes output_malformed — we write
+        // a stub file that doesn't satisfy the goal.
+        lib::atomic_write(&workdir.join("stub.txt"), "placeholder\n")?;
+        lib::emit("file_created", "stub.txt");
+        println!("IMPLEMENTING done: stub (intentional for test)");
+        println!("files: stub.txt");
+    } else {
+        lib::atomic_write(&workdir.join("hello.txt"), "hello from fake-claude\n")?;
+        lib::emit("file_created", "hello.txt");
+        println!("IMPLEMENTING done: produce hello.txt");
+        println!("files: hello.txt");
+    }
     lib::emit_tokens(50, 30);
     lib::emit("agent_finished", "implementing");
-    println!("IMPLEMENTING done: produce hello.txt");
-    println!("files: hello.txt");
     println!("build: n/a   tests: n/a");
     Ok(())
 }
@@ -101,12 +119,19 @@ fn do_refining(workdir: &std::path::Path) -> anyhow::Result<()> {
     let existing = std::fs::read_to_string(&review_path).unwrap_or_default();
     let appended = format!(
         "{existing}\n\n## Claude Code 回应\n\n\
-         ### dummy blocking item\n\
+         ### produce hello.txt\n\
          - status: accepted\n\
-         - action: no-op (fake)\n\
-         - reason: acknowledged\n"
+         - action: wrote hello.txt\n\
+         - reason: blocker addressed by creating the file\n"
     );
     lib::atomic_write(&review_path, &appended)?;
+    // Make sure hello.txt exists (in the refining-first scenario we write it
+    // here rather than during IMPLEMENTING).
+    if !workdir.join("hello.txt").exists() {
+        lib::atomic_write(&workdir.join("hello.txt"), "hello from fake-claude (refined)\n")?;
+    }
+    // Drop the marker so the next review approves.
+    std::fs::write(workdir.join(".fake-refined"), "").ok();
     lib::emit("file_edited", &format!("codex_review_v{max_n}.md"));
     lib::emit_tokens(80, 60);
     println!("REFINING done on v{max_n}: accepted 1, partial 0, rejected 0");

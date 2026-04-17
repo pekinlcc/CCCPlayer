@@ -73,6 +73,10 @@ pub struct Reducer {
     missing_history: Vec<u32>,
     /// retries counter per (agent, rolling-last-5-turns) for §16.8 flapping.
     recent_retries: Vec<(Agent, u32)>,
+    /// Per-phase retry count for the CURRENT turn. Reset on Ok / phase change.
+    /// Implements §16.3 "retry-once" for output_malformed and §16.8
+    /// stalled/crashed retry-once.
+    turn_retries: u32,
 }
 
 impl Reducer {
@@ -84,6 +88,7 @@ impl Reducer {
             gc_codex: None,
             missing_history: Vec::new(),
             recent_retries: Vec::new(),
+            turn_retries: 0,
         }
     }
 
@@ -175,9 +180,31 @@ impl Reducer {
             }
             StateCommand::TurnFinished { agent, phase, outcome } => {
                 self.track_retry(agent, outcome);
+                // Per §16.3 and §16.8: some outcomes retry once before giving up.
+                let is_retryable = matches!(
+                    outcome,
+                    TurnOutcome::OutputMalformed
+                        | TurnOutcome::Stalled
+                        | TurnOutcome::Crashed
+                );
+                if is_retryable && self.turn_retries == 0 {
+                    self.turn_retries += 1;
+                    // Stay in the same state; retry the same phase.
+                    effects.push(Effect::Emit(Event::new(
+                        self.meta.round,
+                        EventKind::Note {
+                            message: format!(
+                                "turn returned {outcome:?}; retrying once in {phase:?}"
+                            ),
+                        },
+                    )));
+                    effects.push(Effect::LaunchTurn { agent, phase });
+                    return effects;
+                }
+                // Ok or terminal failure: clear the per-turn retry counter.
+                self.turn_retries = 0;
                 match outcome {
                     TurnOutcome::Ok => {
-                        // What to do next depends on phase we just finished.
                         let next = match phase {
                             Phase::Planning => Some((Agent::Claude, Phase::Implementing)),
                             Phase::Implementing => Some((Agent::Codex, Phase::Reviewing)),
@@ -456,5 +483,54 @@ mod tests {
         let mut r = mk();
         r.missing_history = vec![3, 3, 3];
         assert!(r.is_stagnating());
+    }
+
+    #[test]
+    fn output_malformed_retries_once_then_errored() {
+        let mut r = mk();
+        r.handle(StateCommand::Start {
+            goal_check_done: None,
+        });
+        // First malformed output → reducer schedules a retry, stays Running.
+        let eff1 = r.handle(StateCommand::TurnFinished {
+            agent: Agent::Claude,
+            phase: Phase::Planning,
+            outcome: TurnOutcome::OutputMalformed,
+        });
+        assert!(matches!(r.meta().state, SessionState::Running));
+        assert!(
+            eff1.iter().any(|e| matches!(
+                e,
+                Effect::LaunchTurn {
+                    phase: Phase::Planning,
+                    ..
+                }
+            )),
+            "should re-launch the same phase for retry"
+        );
+        // Second malformed output → transition to Errored.
+        let eff2 = r.handle(StateCommand::TurnFinished {
+            agent: Agent::Claude,
+            phase: Phase::Planning,
+            outcome: TurnOutcome::OutputMalformed,
+        });
+        assert!(matches!(r.meta().state, SessionState::Errored));
+        assert!(eff2
+            .iter()
+            .any(|e| matches!(e, Effect::NotifyAttention { .. })));
+    }
+
+    #[test]
+    fn refused_skips_retry_goes_straight_to_errored() {
+        let mut r = mk();
+        r.handle(StateCommand::Start {
+            goal_check_done: None,
+        });
+        let _ = r.handle(StateCommand::TurnFinished {
+            agent: Agent::Claude,
+            phase: Phase::Planning,
+            outcome: TurnOutcome::Refused,
+        });
+        assert!(matches!(r.meta().state, SessionState::Errored));
     }
 }

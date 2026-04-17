@@ -63,3 +63,20 @@ export async function stopSession(): Promise<void> {
   const fn = await invoke()
   await fn<void>('stop_session')
 }
+
+// Subscribe to `cccplayer://event` emissions from the orchestrator. Returns
+// an unsubscribe function. Falls back to a no-op when running outside Tauri.
+export async function subscribeEvents(
+  handler: (ev: import('./types').Event) => void,
+): Promise<() => void> {
+  try {
+    const mod = await import('@tauri-apps/api/event')
+    const un = await mod.listen<import('./types').Event>(
+      'cccplayer://event',
+      (payload) => handler(payload.payload),
+    )
+    return () => un()
+  } catch {
+    return () => {}
+  }
+}

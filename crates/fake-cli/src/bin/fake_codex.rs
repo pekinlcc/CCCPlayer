@@ -36,6 +36,14 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn requires_refining(workdir: &std::path::Path) -> bool {
+    // Honor an env var OR a workdir-local marker file. The file-based path is
+    // robust against parallel-test env-var pollution.
+    let force_env = std::env::var("CCCPLAYER_FAKE_FORCE_CHANGES").is_ok();
+    let force_file = workdir.join(".fake-force-changes").exists();
+    (force_env || force_file) && !workdir.join(".fake-refined").exists()
+}
+
 fn do_reviewing(workdir: &std::path::Path) -> anyhow::Result<()> {
     lib::emit("agent_started", "reviewing");
     let re = regex::Regex::new(r"^codex_review_v(\d+)\.md$").unwrap();
@@ -52,8 +60,9 @@ fn do_reviewing(workdir: &std::path::Path) -> anyhow::Result<()> {
     }
     let next = max_n + 1;
 
-    // Approve iff hello.txt exists (fake-claude's test marker).
-    let approved = workdir.join("hello.txt").exists();
+    // Approve iff hello.txt exists (fake-claude's test marker) AND we aren't
+    // being asked to force a first-round changes_requested verdict.
+    let approved = workdir.join("hello.txt").exists() && !requires_refining(workdir);
     let verdict = if approved { "approved" } else { "changes_requested" };
     let blocking = if approved { "" } else { "  - produce hello.txt\n" };
 

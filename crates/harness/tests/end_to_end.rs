@@ -96,3 +96,62 @@ async fn full_loop_reaches_done() {
         meta.state
     );
 }
+
+/// Second integration test: force the first review to request changes, so
+/// the loop exercises REFINING → second REVIEW → GOAL-CHECK → DONE. Uses
+/// CCCPLAYER_FAKE_FORCE_CHANGES env var recognized by the fake CLIs.
+#[tokio::test]
+async fn refining_loop_reaches_done() {
+    let workdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        workdir.path().join("GOAL.md"),
+        "Produce a hello.txt file (via refining).\n",
+    )
+    .unwrap();
+    // File-based flag: robust against parallel-test env pollution.
+    std::fs::write(workdir.path().join(".fake-force-changes"), "").unwrap();
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = PathBuf::from(manifest).join("..").join("..");
+    let fake_claude = workspace_root
+        .join("target")
+        .join("debug")
+        .join("cccplayer-fake-claude");
+    let fake_codex = workspace_root
+        .join("target")
+        .join("debug")
+        .join("cccplayer-fake-codex");
+
+    let session = Session::open(workdir.path()).expect("open");
+    let cfg = OrchestratorConfig {
+        claude_path: fake_claude,
+        codex_path: fake_codex,
+        claude_auto_approve_flag: None,
+        codex_auto_approve_flag: None,
+        stall_threshold: Duration::from_secs(30),
+        fake_mode: true,
+    };
+    let mut orch = Orchestrator::new(session, cfg).expect("new");
+    orch.ensure_initialized("Produce a hello.txt (via refining).")
+        .unwrap();
+
+    let (tx, _rx) = mpsc::unbounded_channel::<cccplayer_core::events::Event>();
+    orch.run(tx).await.expect("run");
+    drop(orch); // release the flock before reopening
+
+    // After refining, both hello.txt (refined) and v1/v2 reviews should
+    // exist; session reaches DONE.
+    assert!(workdir.path().join("hello.txt").exists());
+    assert!(workdir.path().join("codex_review_v1.md").exists());
+    assert!(workdir.path().join("codex_review_v2.md").exists());
+
+    let session = Session::open(workdir.path()).expect("reopen");
+    let meta = cccplayer_core::persistence::load_session_meta(&session)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(meta.state, SessionState::Done),
+        "expected DONE after refining, got {:?}",
+        meta.state
+    );
+}

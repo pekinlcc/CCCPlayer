@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { pauseSession, stopSession } from '../api'
+import { pauseSession, stopSession, subscribeEvents } from '../api'
 import type { Event, Phase, SessionState } from '../types'
 
 // Implements PRD §6.1 three-zone progress display: status band, event
@@ -22,19 +22,41 @@ export function RunningView(props: {
     return () => clearInterval(t)
   }, [])
 
-  // In M1 the event subscription is not yet wired through Tauri; the
-  // orchestrator pushes events to a Rust-side channel which the app layer
-  // will forward via `emit`/`listen` once the app_state plumbing lands.
-  // Until then this view renders its initial scaffolding — the Rust side is
-  // fully functional and can be exercised via the integration test.
+  // Subscribe to events emitted by the orchestrator via Tauri. See §6.1.
   useEffect(() => {
-    // placeholder: in a real invocation we'd `listen('event', …)` here.
-    void setEvents
-    void setPhase
-    void setRound
-    void setClaudeTokens
-    void setCodexTokens
-  }, [])
+    let alive = true
+    let unsubscribe: (() => void) | null = null
+    void (async () => {
+      unsubscribe = await subscribeEvents((ev) => {
+        if (!alive) return
+        setEvents((prev) => [...prev, ev])
+        // Interpret selected event kinds.
+        const k = String(ev.kind)
+        if (k === 'state_changed') {
+          const to = String((ev as { to?: string }).to ?? '')
+          const match = /^([A-Z]+)\/([A-Z_]+)$/.exec(to)
+          if (match) {
+            const nextPhase = match[2] as Phase
+            setPhase(nextPhase)
+            if (to.startsWith('Done')) props.onDone('DONE')
+            if (to.startsWith('Abandoned')) props.onDone('ABANDONED')
+            if (to.startsWith('Errored')) props.onDone('ERRORED')
+          }
+        }
+        if (typeof ev.round === 'number') setRound(ev.round + 1)
+        if (k === 'heartbeat') {
+          const c = (ev as { claude_tokens?: number }).claude_tokens ?? 0
+          const x = (ev as { codex_tokens?: number }).codex_tokens ?? 0
+          setClaudeTokens(c)
+          setCodexTokens(x)
+        }
+      })
+    })()
+    return () => {
+      alive = false
+      if (unsubscribe) unsubscribe()
+    }
+  }, [props])
 
   return (
     <section className="running">
