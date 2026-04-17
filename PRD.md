@@ -117,6 +117,13 @@ CCCPlayer 必须优雅处理工作目录的所有合理起始状态。**不假�
 - `ERRORED`：harness 连续失败达阈值时进入，等待用户介入。
 - `ABANDONED`：用户显式"停止并放弃"后的终态。
 
+**GOAL-CHECK 触发点**（明确，避免歧义）：
+1. 用户点"开始"且 Session 不在 RUNNING 类状态时，**串行**跑一次（先 Claude Code，
+   再 Codex；任一返回 done=false 就立刻按其结论进入下一态，不浪费另一次调用）。
+2. 每个 REVIEWING turn 完成后，若 Codex verdict == `approved`，**并行**跑两个
+   GOAL-CHECK；两个都 done=true 才进 DONE，否则按 §7 的分歧规则继续。
+3. 其他时刻不跑 GOAL-CHECK（避免无谓调用）。
+
 ## 6. UI / 交互设计
 
 一个极简单页应用，参考"唱片机"的隐喻（呼应 CCCPlayer 名字）：
@@ -179,6 +186,38 @@ CCCPlayer 必须优雅处理工作目录的所有合理起始状态。**不假�
 事件时间线与状态条是"产品态"，原始日志抽屉是"开发者态"——两层分离，保证默认
 视图不像 Terminal、需要时又能一键下钻到 Terminal。
 
+### 6.2 首次启动 / 空白态
+
+应用第一次启动、或当前没有任何活动 Session 时，主区域显示一个简短欢迎页：
+
+```
+┌──────────────────────────────────────────────┐
+│  CCCPlayer                                   │
+│                                              │
+│  让 Claude Code 和 Codex 替你来回打磨代码      │
+│  直到目标达成。                                │
+│                                              │
+│  [  选择工作目录  ]                            │
+│                                              │
+│  Preflight                                   │
+│  ● Claude Code CLI    检查中…                │
+│  ● Codex CLI          检查中…                │
+│  ● Claude 登录态      待目录选定后再检测        │
+│  ● Codex 登录态       待目录选定后再检测        │
+└──────────────────────────────────────────────┘
+```
+
+选定目录后：
+- 若目录里已有 `.cccplayer/session.json` → 进入"恢复已有 Session"视图（顶部显示
+  旧目标 + 旧状态 + 一键继续 / 归档新建）。
+- 否则 → 显示目标输入框，preflight 跑完且全绿才启用"开始"。
+
+### 6.3 工作目录的切换
+
+活跃 Session 中（任何 RUNNING / PAUSED 中态）禁止切换工作目录——切换按钮灰显并
+浮提示"先停止当前 Session 再切换"。这避免编辑器一样的"打开新文件丢失改动"陷阱。
+Session 处于 DONE / ABANDONED / 未开始时可自由切换。
+
 ## 7. "开始"按钮的决策树
 
 这是产品的核心鲁棒性来源，必须在一处集中实现：
@@ -225,7 +264,8 @@ on_click_start(session):
 
 ```
 .cccplayer/
-├── session.json          # 状态机、Round 计数、时间戳（Goal 不在这里，见下）
+├── session.json          # 状态机、Round 计数、时间戳、schema_version
+├── session.lock          # 文件锁，单 Session 互斥（见下）
 ├── events.log            # 追加式事件流（事件流 UI 的数据源）
 ├── usage.json            # 本 Session 累计 token / 成本（见 §16.7）
 ├── transcripts/
@@ -237,6 +277,16 @@ on_click_start(session):
     ├── round-01.tar.zst  # 每 Round 开始前对工作树打包（排除 .cccplayer 自身）
     └── …
 ```
+
+`session.json` 必须含 `"schema_version": 1` 字段。后续 PRD 演进改字段时按 version
+做迁移，不在此 PRD 展开迁移脚本。
+
+`session.lock` 是 `flock(2)` 排他锁文件：
+- 应用启动并打算操作某个工作目录前，先尝试持锁。失败 → 弹窗 "另一个 CCCPlayer
+  实例已经在使用这个目录"，禁止打开。
+- 持锁文件里写入当前进程 pid + 进程启动时间（`start_boottime`）；下次任何实例
+  启动时若发现锁存在但匹配的 pid+start_time 已不存在，视作残留锁可清理。
+- 仅匹配 pid 不够——pid 可被复用；必须 pid+start_time 双匹配，避免误杀新进程。
 
 **`round-00` 快照是用户原始代码的保险丝**：无论后续 agent 改了多少，用户随时可以
 "回到我最初给你的那份代码"，零风险地试。
@@ -329,12 +379,18 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
 2. **用户显式暂停 / 停止**。
 3. **进程卡死**（进入 `ERRORED`）：stream-json 事件流连续 10 分钟无任何新事件
    （可在设置里调），视作 harness 无心跳，触发一次自动 cancel + 重试；再次卡死
-   则停下来等用户介入。这是**唯一的被动时间判断**。
-4. **震荡**（进入 `ERRORED`，等用户介入）：
-   - 连续 2 轮 Codex 评审的 blocking 列表高度相似（Haiku 做相似度判断）；或
-   - 同一 Round 内双方 Goal-Check 分歧 3 次且 `missing` 列表稳定不变。
+   则停下来等用户介入。**注意**：这里的"10 分钟"必须用对睡眠免疫的时钟——
+   `CLOCK_MONOTONIC` + `NSWorkspace` 唤醒通知重置基准（见 §16.4）。
+4. **震荡 / 停滞**（进入 `ERRORED`，等用户介入），任一触发：
+   - 连续 2 轮 Codex 评审的 blocking 列表高度相似（Haiku 做相似度判断）；
+   - 同一 Round 内双方 Goal-Check 分歧 3 次且 `missing` 列表稳定不变；
+   - **进展停滞**：连续 3 轮双方 Goal-Check 的合并 `missing` 列表大小**没有
+     严格下降**（哪怕内容变了），视作"在原地换姿势"。
 5. **认证失效**（进入 `PAUSED`）：harness 检测到 CLI 返回认证错误，提示用户
    登录后恢复（见 §16.2）。
+6. **Agent 拒绝**（进入 `ERRORED`）：harness 识别到 CLI 输出疑似拒绝模式
+   （exit 0 + 无文件改动 + 关键词如 "I can't"、"I won't"、"refuse" 等），
+   **不重试**——直接提示用户调整目标。识别策略见 §16.8。
 
 **默认没有** Round 数上限、没有 Session wall-clock、没有 token 预算。设置里提供
 可选的 Round 数硬帽（默认关闭）给想兜底的用户。
@@ -344,7 +400,9 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
 - 仅在用户选定的工作目录内读写；应用自身目录与系统目录访问走 macOS 的 TCC。
 - 不代替用户登录 CLI；不持有 API key。
 - 运行期默认**离线文档可见**、**联网由 CLI 本身决定**；应用不额外外联。
-- 事件流中对可能包含密钥的行做基础脱敏（`sk-…`、`ghp_…` 等正则）。
+- **脱敏**：harness 在写 `transcripts/*.txt`、`events.log` **以及** UI 推流前都跑
+  一遍正则脱敏（`sk-…`、`ghp_…`、`xoxb-…`、`AKIA…`、`-----BEGIN ...PRIVATE KEY-----`
+  等常见模式）。脱敏在写盘前完成——一旦原文落盘就无法再保证。
 
 ## 13. 里程碑
 
@@ -395,6 +453,13 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
 - 启动时跑一次 "CLI probe"：调 `--version` / `--help`，把支持的 flag 与输出模式
   固化到 `.cccplayer/cli-info.json`，后续调用据此选择参数——抵御 CLI 跨版本差异。
 
+**子进程生命周期管理**（防止"主进程崩了 CLI 还在烧钱"）：
+- spawn 时设独立进程组（`setsid` 或 `pre_exec` 调 `setpgid(0, 0)`），`kill_on_drop(true)`。
+- 取消信号顺序固定：SIGINT → 5s → SIGTERM → 5s → SIGKILL，且作用于整个进程组。
+- session.json 记录每个在途子进程的 `(pid, start_boottime)` 二元组。下次启动时
+  发现遗留记录，**用 `(pid, start_boottime)` 双匹配**判断是否真是我们的进程，
+  避免 pid 复用误杀。匹配上就回收，匹配不上就清理记录。
+
 ### 16.2 macOS PATH 与 preflight
 
 - macOS GUI app **不继承** shell PATH，因此从 Finder 启动时 `/opt/homebrew/bin/claude`
@@ -417,6 +482,8 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
   自己在 `~/.claude`、`~/.codex` 下的 token 文件复用。
 - **运行中失效的处理**：harness 在 stderr 中匹配常见认证失败字样 / HTTP 401，立即
   进入 `PAUSED` 状态并展示"请在 Terminal 运行 `<登录命令>` 后点恢复"。
+- **两个 CLI 缺一不可**：preflight 任一项不通过即禁用"开始"。**不**提供单 agent
+  降级模式——产品契约就是双方共识，降级会破坏这个契约。
 
 ### 16.3 输出解析鲁棒性
 
@@ -439,6 +506,13 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
   3. 重试仍卡死 → 进 `ERRORED`，等用户介入。
 - 事件流里展示 CLI 回报的 token 用量，纯信息性；不构成停止条件。
 - 用户想要兜底时，可在设置里开启"Round 数硬帽"（默认关闭），或手动点暂停 / 停止。
+
+**时钟选择（关键）**：
+- 用 `CLOCK_MONOTONIC`（macOS / Linux 上睡眠期间停走）计算"距上次心跳过去多久"，
+  **不要**用 wall-clock。否则用户合盖一晚再打开会立刻误判卡死。
+- 同时订阅 `NSWorkspaceDidWakeNotification` / `NSWorkspaceDidSleepNotification`：
+  唤醒时把心跳基准重置为"刚刚"，给 CLI 几分钟缓冲再重新计时。
+- 这两条加上去，合盖、锁屏、网络断开恢复都不会触发误报。
 
 **不做**的事：
 - 不按 token 数停。
@@ -470,6 +544,34 @@ M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-j
   命令，等真机探测稳定后再作为增量（M3+）加入。找不到稳定接口就老实标"不可用"，
   不伪造数字。
 - 用量数字**不**参与任何停止条件，纯展示。
+
+### 16.8 Turn 结束分类与重试策略
+
+每个 turn 结束（CLI 退出 / 被 cancel）时，harness 必须对结果做分类，决定下一步：
+
+| 结果分类 | 判别条件 | 处理 |
+| --- | --- | --- |
+| `ok` | exit 0 + 产出物符合预期（如 PRD.md 被改、verdict 段存在等） | 进入下一态 |
+| `output_malformed` | exit 0 但产出物缺关键段（无 verdict / 无 JSON 块） | 走 §16.3 的 retry-with-clarification，最多 1 次；再不行 → `ERRORED` |
+| `stalled` | 心跳超时（见 §16.4） | 自动 cancel + retry 1 次；再卡 → `ERRORED` |
+| `crashed` | 非零 exit 且非认证错误 | retry 1 次；再失败 → `ERRORED` |
+| `auth_failed` | stderr 命中认证模式 | 不 retry → `PAUSED`，引导用户登录 |
+| `refused` | exit 0 + 工作树无文件改动 + 输出命中拒绝关键词（"I can't help"、"I won't"、"unable to"、"refuse" 等，全词或开头匹配） | 不 retry → `ERRORED`，提示用户修改目标 |
+
+判定顺序：`auth_failed` > `refused` > `stalled` > `crashed` > `output_malformed` > `ok`。
+
+### 16.9 暂停语义
+
+"暂停"按钮在不同时刻含义不同，必须明确：
+
+| 暂停时机 | 行为 |
+| --- | --- |
+| Turn 进行中 | 走 cancel 协议（SIGINT→SIGTERM→SIGKILL），**回滚本 turn 到 Round 起始 snapshot**，记录"暂停在 phase X、Round N、turn T"。恢复时从该 turn 起点重跑。 |
+| Turn 之间（短暂的状态机过渡） | 仅记录状态，不回滚。恢复时直接进下一个 turn。 |
+| PLANNING 第一个 turn（Round 1） | 同上 cancel + 回滚到 round-00 snapshot；恢复后从头 PLANNING。这意味着 PLANNING 中途暂停**会丢弃**到目前为止的 PRD 草稿。UI 必须明示这一点，不要静默丢工作。 |
+
+恢复（点"开始"）时，§7 的决策树先跑 GOAL-CHECK，可能直接判定已 DONE 或换状态，
+不一定回到原暂停点——这是设计上有意如此（万一外部状态变了）。
 
 ## 17. Prompt 模板（待你确认）
 
@@ -691,8 +793,38 @@ next_state rules:
 | 13 | 进度显示 | 状态条 + 事件时间线 + 原始日志抽屉 | §6.1 |
 | 14 | 用量显示 | M1 只显示本 Session 累计 token；滚动 / 周度余额延后，待 CLI 能力探测后再做 | §16.7 |
 | 15 | 非空工作目录 | 支持既有代码：PLANNING 先盘点、PRD 含 "Current state"、`round-00` 保留原始快照 | §2.1、§10、§17.1 |
+| 16 | 心跳时钟 | 用 CLOCK_MONOTONIC + macOS 唤醒通知，避免合盖误判卡死 | §16.4 |
+| 17 | 子进程治理 | 进程组 + kill_on_drop + (pid,start_boottime) 双匹配防 pid 复用 | §16.1 |
+| 18 | 落盘脱敏 | transcripts 与 events.log 写盘前先做正则脱敏 | §12 |
+| 19 | GOAL-CHECK 触发与并行 | 入口串行、REVIEWING 末尾并行；其他时刻不跑 | §5 |
+| 20 | session 文件锁 + schema 版本 | flock 互斥单实例；session.json 带 schema_version=1 | §8 |
+| 21 | 进展停滞 | missing 列表大小连续 3 轮不严格下降视作停滞 → ERRORED | §11 |
+| 22 | Agent 拒绝识别 | 关键词 + 无文件改动检测；不重试，提示改目标 | §11、§16.8 |
+| 23 | 单 agent 不可用 | hard-stop，不提供降级模式 | §16.2 |
+| 24 | 首次启动 / 切换目录 | 空白态欢迎页 + preflight；活跃 Session 中禁切目录 | §6.2、§6.3 |
+| 25 | Turn 结果分类 | 6 种结果 + 明确判定顺序 + 各自重试策略 | §16.8 |
+| 26 | 暂停语义 | 中途暂停 cancel+回滚；turn 间暂停仅记录；PLANNING 中途暂停会丢稿（明示） | §16.9 |
 
 ---
 
-*下一步：进入 M1 的工程拆分——仓库骨架、状态机骨架、harness 接口与一个能跑通
-"PLANNING → IMPLEMENTING → REVIEWING"最小回路的 demo。*
+## 19. 已知事项 / 后续优化（不阻塞 M1）
+
+明确写下来，免得日后当成"漏了"：
+
+1. **快照磁盘膨胀**：N 个 Round × 几十 MB-几 GB 可能累计很大。M2+ 引入保留策略
+   （永远保留 `round-00` 与最近 5 份；中间的延迟 GC）。
+2. **大型现有代码库 PLANNING 爆 context**：先依赖 Claude Code 自身的上下文管理；
+   PRD 的 Current state 节若被截断，至少 PRD 应记一句"survey 不完全"。M2 考虑分
+   层 survey。
+3. **Fake CLI 测试套件**：M1 之内做出 `cccplayer-fake-claude` / `cccplayer-fake-codex`
+   两个可执行 fixture，能按预设脚本吐 stream-json。集成测试和回归测试都用 fake，
+   不烧真实 token。**这一项虽列在"已知事项"里，但开发阶段必做**——M1 工程拆分
+   时一并安排。
+4. **Schema 迁移脚本**：`session.json` 字段升级时的迁移函数。第一次破坏性升级前
+   不必预先建框架。
+5. **滚动 / 周度配额显示**：见 §16.7。M3+ 视 CLI 能力。
+
+---
+
+*下一步：进入 M1 的工程拆分——仓库骨架、状态机骨架、harness 接口、fake CLI、
+以及一个能跑通 "PLANNING → IMPLEMENTING → REVIEWING" 最小回路的 demo。*
