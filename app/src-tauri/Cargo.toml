@@ -11,7 +11,13 @@ path = "src/main.rs"
 # Default is "library" style so `cargo check` works without pulling Tauri
 # native deps; `tauri` feature enables the full desktop binary.
 default = []
-tauri = ["dep:tauri", "dep:tauri-build"]
+tauri = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-notification",
+    "dep:objc2",
+    "dep:objc2-foundation",
+]
 
 [dependencies]
 cccplayer-core = { path = "../../crates/core" }
@@ -24,6 +30,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
 tauri = { version = "2", optional = true }
+tauri-plugin-notification = { version = "2", optional = true }
+
+# macOS-only: NSProcessInfo.beginActivity for App Nap suppression (§16.12).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.5", optional = true }
+objc2-foundation = { version = "0.2", features = ["NSProcessInfo", "NSString"], optional = true }
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true }

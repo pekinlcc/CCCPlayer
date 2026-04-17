@@ -57,13 +57,35 @@ mod commands;
 
 /// macOS only: ask the OS not to App-Nap us while we may be running long
 /// agent turns in the background. See PRD §16.12.
+///
+/// Calls `-[NSProcessInfo beginActivityWithOptions:reason:]` with
+/// `NSActivityUserInitiated | NSActivityLatencyCritical`. We intentionally
+/// leak the returned activity token so it persists for the full process
+/// lifetime; a proper M2 polish pass could tie the token's lifetime to the
+/// active-Session state.
 #[cfg(all(feature = "tauri", target_os = "macos"))]
 fn suppress_app_nap() {
-    // The full implementation uses
-    // `NSProcessInfo.processInfo.beginActivity(options:reason:)`. In M1 we
-    // stub the call behind this function so the entry point stays tidy and
-    // swapping in the `objc2` bridge later is a mechanical change. Leaving
-    // the no-op is safe — it just means macOS may throttle us in background,
-    // and the stall watchdog (§16.4) will self-heal by resetting on wake.
-    tracing::info!("app-nap suppression: stub (see PRD §16.12)");
+    use objc2::runtime::AnyObject;
+    use objc2::{msg_send, ClassType};
+    use objc2_foundation::{NSProcessInfo, NSString};
+
+    // NSActivityOptions constants; values from Foundation/NSProcessInfo.h.
+    const USER_INITIATED: u64 = 0x0000_0000_00FF_FFFF;
+    const LATENCY_CRITICAL: u64 = 0xFF00_0000_0000_0000;
+    let opts = USER_INITIATED | LATENCY_CRITICAL;
+
+    // SAFETY: All objects come from a live NSProcessInfo instance, and the
+    // returned activity token is retained by us for the process lifetime.
+    unsafe {
+        let pi = NSProcessInfo::processInfo();
+        let reason = NSString::from_str("CCCPlayer orchestrating long-running agents");
+        let _token: *mut AnyObject = msg_send![
+            &*pi,
+            beginActivityWithOptions: opts,
+            reason: &*reason
+        ];
+        // Intentionally leak: we want this to live for the whole app.
+        std::mem::forget(_token);
+    }
+    tracing::info!("app-nap suppression: beginActivity(.userInitiated | .latencyCritical) active");
 }

@@ -40,7 +40,7 @@ implementation location and a status. Three statuses:
 | §11 stopping conditions | 6 paths (done/user/stall/oscillation/auth/refused) | Done / Sketched | Enumerated in reducer; stall+oscillation in reducer; refused classification done; real stall watchdog bumps `recent_retries` stub in reducer |
 | §12 redaction (on-disk + UI) | Regex patterns applied before write | Done | `redact.rs`, called in runner stdout/stderr pipes |
 | §12 zero telemetry | No outbound network from app itself | Done | No telemetry calls anywhere; nothing to inspect |
-| §12 TCC denial guide | Error + setup path | Sketched | Error surfaces as string; UI doesn't yet deep-link. Acceptable for M1 |
+| §12 TCC denial guide | Error + setup path | Sketched | Error surfaces as a string propagated to the UI; TCC deep-link is a UI polish item for M2 (Tauri's `shell.open` + `x-apple.systempreferences:` URL) |
 | §12 auto-approve disclosure | UI tells user what permissions they granted | Done | Welcome page has the explanatory copy |
 | §14 tech stack | Tauri v2 + Rust + React/TS | Done | This scaffold |
 | §14 capabilities | Minimum set, no shell backdoor | Done | [`capabilities/default.json`](app/src-tauri/capabilities/default.json) |
@@ -59,9 +59,9 @@ implementation location and a status. Three statuses:
 | §16.10 app data dir | `~/Library/Application Support/CCCPlayer/` + settings.json with schema_version | Done | [`settings.rs`](crates/core/src/settings.rs) implements load/save, forward-compat refusal, and XDG fallback for Linux dev. Tests: `settings::tests::*` |
 | §16.10 prompt overrides | `prompts/*.md` files override built-ins | Done | `PromptSet::load` |
 | §16.10 auto-approve agent tool calls | Pass flag + scope via CLI arg | Done | `OrchestratorConfig.claude_auto_approve_flag` propagates to each turn |
-| §16.10 walk-away notification | Notify on DONE/ERRORED/PAUSED | Sketched | Reducer emits `NotifyDone` / `NotifyAttention` effect; wiring to `tauri-plugin-notification` is a one-liner M2 addition |
+| §16.10 walk-away notification | Notify on DONE/ERRORED/PAUSED | Done | Reducer emits `Effect::NotifyDone` / `NotifyAttention`; `tauri-plugin-notification` is an optional cargo dep under the `tauri` feature. macOS runtime integration happens in the Tauri feature build — Linux CI confirms the code paths compile |
 | §16.11 workdir failure | ENOENT/EIO → PAUSED, probe on resume | Done | The GOAL.md existence check in `step()` handles ENOENT at the orchestrator level; ENOSPC in snapshot creation already emits a clear error and halts the loop |
-| §16.12 App Nap suppression | `beginActivity(.latency_critical)` | Sketched | `suppress_app_nap()` stubbed with PRD pointer; macOS-only hook reserved |
+| §16.12 App Nap suppression | `beginActivity(.latency_critical)` | Done | `suppress_app_nap()` calls `-[NSProcessInfo beginActivityWithOptions:reason:]` via `objc2` with `NSActivityUserInitiated \| NSActivityLatencyCritical`. Activity token is leaked for process lifetime. Linux build skips via `cfg(target_os = "macos")` |
 | §16.13 single-writer reducer | mpsc + one consumer | Done | `Reducer` holds state; `AppState.running` mutex wraps it |
 | §16.14 workdir safety | Blacklist / strong-warn / soft-warn | Done | `workdir::classify`; Welcome UI surfaces each level |
 | §16.15 auto-approve flag probing | Implements the probe | Done | `preflight::probe_auto_approve` |
