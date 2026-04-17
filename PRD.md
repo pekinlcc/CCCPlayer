@@ -295,7 +295,9 @@ on_click_start(session):
 - 如果用户的目录恰好是 git 仓库，CCCPlayer 不调用 `git commit` / `git stash`，
   也不创建分支，避免污染用户的历史。
 - 快照一律用 `tar + zstd` 落在 `.cccplayer/snapshots/` 下；回滚就是解压覆盖。
-- 用户想把 CCCPlayer 的中间产物版本化，自己决定是否把 `.cccplayer/` 加入 `.gitignore`。
+- **`.gitignore` 自动追加**：Session 创建时若工作目录根存在 `.git/`，自动在
+  `.gitignore` 末尾追加 `.cccplayer/`（已存在则跳过）。事件流里通知用户做了这
+  一步。这避免 `git add .` 把 GB 级 tar 包误提交。
 
 恢复策略：
 - 应用启动时扫描选中目录下的 `.cccplayer/session.json` 还原状态机。
@@ -403,6 +405,14 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
 - **脱敏**：harness 在写 `transcripts/*.txt`、`events.log` **以及** UI 推流前都跑
   一遍正则脱敏（`sk-…`、`ghp_…`、`xoxb-…`、`AKIA…`、`-----BEGIN ...PRIVATE KEY-----`
   等常见模式）。脱敏在写盘前完成——一旦原文落盘就无法再保证。
+- **零遥测**：CCCPlayer 自身不发送任何分析、日志或崩溃报告到外部。所有数据留
+  在本地（工作目录 `.cccplayer/` 与 `~/Library/Application Support/CCCPlayer/`）。
+  这是产品级承诺，不在设置里提供"启用遥测"开关。
+- **TCC 拒绝处理**：用户首次选择目录时，若 macOS 抛出权限错误（EACCES），引导
+  用户到 系统设置 → 隐私与安全性 → 文件与文件夹 中授予权限，并提供"重试"按钮。
+- **自动批准 agent 工具调用**（关键）：见 §16.10。CCCPlayer 是无人值守编排器，
+  必须让 agent 在工作目录范围内自由执行工具调用，否则循环会卡在第一次危险操作
+  上等用户确认。这是一项有意识的权限取舍，UI 必须明示。
 
 ## 13. 里程碑
 
@@ -429,6 +439,17 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
 - `cccplayer-harness-claude` / `cccplayer-harness-codex`（Rust）：CLI 封装。
 - `cccplayer-ui`（React）：三要素 UI + 事件流订阅 + 设置页。
 - `cccplayer-app`（Tauri）：把以上三者粘起来，加 macOS 菜单、TCC 权限请求。
+
+**Tauri v2 capabilities（M1 工程拆分必带）**：
+- `core:default`、`shell:allow-execute`（限定可执行文件名为 `claude`、`codex`、
+  `tar`、`zstd`，绝对路径白名单）。
+- `fs:allow-read-recursive` / `fs:allow-write-recursive`：仅对用户已选目录与
+  应用数据目录授权，**不**给全盘。
+- `notification:default`：用于 §16.10 的走开通知。
+- 不启用 `shell:default` 的"任意命令"能力——所有 shell 调用经 harness 走，
+  Tauri 层不开后门。
+- `tauri.conf.json` 的 `bundle.macOS.entitlements` 暂不要求沙箱（开发阶段免麻
+  烦），分发包阶段再决定是否走 App Store 沙箱（M3+）。
 
 ## 15. 已关闭的问题（决策记录）
 
@@ -519,12 +540,27 @@ Round 循环**不设**整体时长上限，也不设 token 预算。只在以下
 - 不按 Session 累计 wall-clock 停。
 - 不按单 turn wall-clock 停（只要进程仍在正常推进事件，哪怕 2 小时也不干预）。
 
-### 16.5 原子写与回滚
+### 16.5 原子写、回滚与外部编辑冲突
 
 - 所有 prompt 强制 agent 以 "写 tmp → rename" 完成文件写入。
 - 每个 Round 启动前对工作树做 `tar + zstd` 快照落 `.cccplayer/snapshots/`。
 - turn 被取消或崩溃时，harness 将该 turn 的所有文件改动回滚到本 Round 起始快照
   （不回滚到更早，避免损失已确认的进度）。
+
+**用户外部编辑冲突防护**（针对 GOAL.md / PRD.md 这类共享文件）：
+- 每 Round 起始时记录 GOAL.md、PRD.md 的 `mtime` + size + sha256（轻量）。
+- 下一次 agent 准备改写 PRD.md 之前，harness 先做对比：若 mtime/sha256 与本
+  Round 起始记录不一致，说明用户在过程中手工编辑过，**不静默覆盖**——弹窗
+  让用户三选一：
+  1. **以用户改动为准**：取消本 turn，把用户版本作为新基线，下一 turn 重跑。
+  2. **以 agent 即将写入的版本为准**：覆盖（用户改动会进 round 起始快照里，
+     可手工恢复）。
+  3. **取消并暂停**：进 PAUSED，让用户决定。
+- GOAL.md 的处理更严格：被外部编辑（含删除）→ 立刻 `PAUSED`，不允许 agent 把
+  目标"漂"过去。GOAL.md 是 Session 级不可变契约。
+
+**GOAL.md 删除监测**：每个 turn 启动前 harness 强制读一次 GOAL.md。文件不存在
+→ 立刻 `PAUSED`，提示"目标文件丢失，请恢复或新建 Session"。
 
 ### 16.6 模型与推理参数
 
@@ -551,14 +587,24 @@ M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-j
 
 | 结果分类 | 判别条件 | 处理 |
 | --- | --- | --- |
-| `ok` | exit 0 + 产出物符合预期（如 PRD.md 被改、verdict 段存在等） | 进入下一态 |
-| `output_malformed` | exit 0 但产出物缺关键段（无 verdict / 无 JSON 块） | 走 §16.3 的 retry-with-clarification，最多 1 次；再不行 → `ERRORED` |
+| `ok` | exit 0 + 产出物符合预期（见下方"产出物预期"） | 进入下一态 |
+| `output_malformed` | exit 0 但产出物缺关键段 / 关键文件缺失或空 | 走 §16.3 的 retry-with-clarification，最多 1 次；再不行 → `ERRORED` |
 | `stalled` | 心跳超时（见 §16.4） | 自动 cancel + retry 1 次；再卡 → `ERRORED` |
 | `crashed` | 非零 exit 且非认证错误 | retry 1 次；再失败 → `ERRORED` |
 | `auth_failed` | stderr 命中认证模式 | 不 retry → `PAUSED`，引导用户登录 |
 | `refused` | exit 0 + 工作树无文件改动 + 输出命中拒绝关键词（"I can't help"、"I won't"、"unable to"、"refuse" 等，全词或开头匹配） | 不 retry → `ERRORED`，提示用户修改目标 |
 
 判定顺序：`auth_failed` > `refused` > `stalled` > `crashed` > `output_malformed` > `ok`。
+
+**各阶段产出物预期**（用于 `ok` / `output_malformed` 判定）：
+
+| 阶段 | 必须存在 | 必须包含 |
+| --- | --- | --- |
+| PLANNING | `PRD.md` 非空 | §17.1 列的 7 个一级 heading 全在；Goal 节非空 |
+| IMPLEMENTING | （只看是否有合理工作树改动） | 至少一个非 `.cccplayer/` 下的文件被新建/修改；exit summary 里出现 "files:" |
+| REFINING | 最新 `codex_review_v{N}.md` 末尾出现 `## Claude Code 回应` 段 | 该段下至少一个 `### …` 子节 |
+| REVIEWING | 新增 `codex_review_v{N+1}.md` | `## Verdict` 段存在且 `status:` 为三种合法值之一；`approved` 时 `blocking:` 必须空 |
+| GOAL-CHECK | 一段 fenced JSON | 含 `done`/`missing`/`next_state`/`rationale` 四字段，类型正确 |
 
 ### 16.9 暂停语义
 
@@ -572,6 +618,52 @@ M1 只做最简单的一档：**本 Session 累计 token 用量**，从 stream-j
 
 恢复（点"开始"）时，§7 的决策树先跑 GOAL-CHECK，可能直接判定已 DONE 或换状态，
 不一定回到原暂停点——这是设计上有意如此（万一外部状态变了）。
+
+### 16.10 应用数据目录、Prompt 模板覆盖与 Agent 工具自动批准
+
+**应用数据目录**（区分于工作目录）：
+```
+~/Library/Application Support/CCCPlayer/
+├── settings.json     # 全局设置：CLI 绝对路径、模型、心跳超时、Round 硬帽…
+├── prompts/          # 用户自定义 prompt 模板，覆盖内置默认
+│   ├── planning.md
+│   ├── implementing.md
+│   ├── refining.md
+│   ├── reviewing.md
+│   └── goal-check.md
+└── logs/             # 应用自身（非 Session）日志
+```
+- 设置面板对外是 GUI；底层就是这份 `settings.json`，可手工编辑。
+- `prompts/` 任一文件存在则覆盖内置默认；缺失则用应用包内默认。设置页有
+  "重置该模板为默认"按钮和"重新加载"按钮（不需要重启）。
+
+**Agent 工具调用自动批准**（M1 关键决策）：
+- Claude Code 与 Codex 默认会在执行危险操作前请用户确认（写文件、跑 shell 命
+  令、改 git…）。在 CCCPlayer 的无头编排里没人确认，循环会**永久阻塞**。
+- 因此 harness 调用两个 CLI 时，必须传入"自动批准全部工具调用"的等效参数
+  （Claude Code 是 `--dangerously-skip-permissions` 一类，Codex 类似；具体名称
+  M1 CLI probe 时确定）。
+- **作用域 = 工作目录内**：通过 CLI 自带的目录限定参数（如 `--add-dir <workdir>`）
+  把 agent 的可写边界限定在工作目录里，**不允许 agent 操作工作目录之外的文件**。
+- 这是有意识的权限取舍——产品卖点就是"无人值守"。UI 必须在首次启动 / 设置页
+  明示："CCCPlayer 会让两个 agent 在你选定的工作目录内自由读写、执行命令；
+  请确保选择的目录里没有不能丢的关键资产，并保留备份。"
+
+**走开通知**：
+- 进入 `DONE` / `ERRORED` / `PAUSED` 这三个用户需要回到电脑前的状态时，发一条
+  macOS 系统通知（`tauri-plugin-notification`）。
+- 通知点击后跳回应用主窗。
+- 设置里可关闭。
+
+### 16.11 工作目录失联
+
+工作目录所在卷（外接盘、网络盘、远程挂载）随时可能消失。harness 的所有写操作
+若返回 `ENOENT` / `EIO` / `EROFS`：
+
+- 立刻进 `PAUSED`，不重试（重试会刷大量错误日志）。
+- UI 显示"工作目录已失联：`<path>` 不可访问。请确认设备已挂载后点恢复"。
+- 恢复时先做一次目录探活（写一个 `.cccplayer/.alive` 临时文件并删除），通过才进
+  下一态。
 
 ## 17. Prompt 模板（待你确认）
 
@@ -656,14 +748,21 @@ You are working in {workdir}. Read, in order:
   1. GOAL.md (read-only).
   2. PRD.md.
   3. codex_review_v{N}.md — the highest-numbered review file.
+  4. If present, a "## Goal-Check 待办" section appended to that same review
+     file by the orchestrator — this lists items that BOTH agents agreed
+     are still missing for the goal, even though the latest verdict was
+     "approved" on code quality. Treat each such item with the same
+     severity as a blocking review finding.
 
 That review ends with a "## Verdict" section listing blocking and optional
-non_blocking items.
+non_blocking items. Combine that list with any "Goal-Check 待办" items as
+your full work set for this turn.
 
 Task for this turn:
 
-A. Address every blocking item. For each, either fix it (in code and/or
-   PRD.md) or reject it with a specific technical reason.
+A. Address every blocking item AND every Goal-Check 待办 item. For each,
+   either fix it (in code and/or PRD.md) or reject it with a specific
+   technical reason.
 
 B. Consider non_blocking items; act on them only when clearly beneficial.
 
@@ -804,6 +903,18 @@ next_state rules:
 | 24 | 首次启动 / 切换目录 | 空白态欢迎页 + preflight；活跃 Session 中禁切目录 | §6.2、§6.3 |
 | 25 | Turn 结果分类 | 6 种结果 + 明确判定顺序 + 各自重试策略 | §16.8 |
 | 26 | 暂停语义 | 中途暂停 cancel+回滚；turn 间暂停仅记录；PLANNING 中途暂停会丢稿（明示） | §16.9 |
+| 27 | 用户外部编辑冲突 | mtime+sha256 对比，PRD.md 三选一弹窗，GOAL.md 严格不允许漂移 | §16.5 |
+| 28 | GOAL.md 删除监测 | 每 turn 启动前重读，丢失即 PAUSED | §16.5 |
+| 29 | `.gitignore` 自动追加 | Session 创建时若有 `.git/` 则追加 `.cccplayer/` | §8 |
+| 30 | 应用数据目录 | `~/Library/Application Support/CCCPlayer/`：settings + prompts 覆盖 + logs | §16.10 |
+| 31 | Agent 工具自动批准 | 传 `--dangerously-skip-permissions` 类参数 + 用 CLI 自带目录限定，无人值守的代价 | §16.10、§12 |
+| 32 | 走开通知 | 进 DONE/ERRORED/PAUSED 时发 macOS 系统通知 | §16.10 |
+| 33 | 工作目录失联 | ENOENT/EIO 立即 PAUSED，恢复时探活 | §16.11 |
+| 34 | 各阶段产出物预期 | 表格化各 turn 的"合格输出"判据，喂给 §16.8 分类器 | §16.8 |
+| 35 | REFINING 兼容 Goal-Check 来源 | 当 verdict=approved 但 Goal-Check 不通过时，写 `## Goal-Check 待办` 段供 REFINING 当 blocking 处理 | §17.3 |
+| 36 | 零遥测 | 产品级承诺，无开关 | §12 |
+| 37 | TCC 拒绝处理 | 引导到系统设置 + 重试按钮 | §12 |
+| 38 | Tauri capabilities | 最小可执行白名单 + 仅授权工作目录读写 + 通知；不开 shell 后门 | §14 |
 
 ---
 
@@ -823,6 +934,18 @@ next_state rules:
 4. **Schema 迁移脚本**：`session.json` 字段升级时的迁移函数。第一次破坏性升级前
    不必预先建框架。
 5. **滚动 / 周度配额显示**：见 §16.7。M3+ 视 CLI 能力。
+6. **events.log 滚动**：单 Session 跑久会膨胀到几十 MB。M2 加按大小切片归档。
+7. **目标文本中的 prompt injection**：用户输入的目标会原样进 GOAL.md 与 prompt。
+   不专门防御——两个 agent 自身的 guardrail 兜底；CCCPlayer 不试图做内容审查。
+8. **CCCPlayer 自指开发**：用 CCCPlayer 来开发 CCCPlayer 时，工作目录必须指向
+   一份**独立的源码副本**，不能指向当前正在运行的 binary 所在目录。README 与
+   首次启动提示里写明。
+9. **PRD/Review 文档自身膨胀**：PRD.md 多轮修订后可能很大；Goal-Check 把整份
+   PRD + 最新 review 喂回 agent，可能逼近 CLI 上下文上限。M2 加"摘要节"或"差量
+   评估"机制；M1 暂时信任 CLI 自己的截断策略。
+10. **Gatekeeper 首次启动**：未签名版本 macOS 默认拒绝运行。M1 开发用户右键
+    "打开"绕过；M3 完成签名 + 公证。
+11. **键盘快捷键 / 无障碍**：M2 加 Cmd+Enter / Esc 等基本快捷键与 VoiceOver。
 
 ---
 
