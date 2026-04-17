@@ -18,6 +18,11 @@ fn main() -> anyhow::Result<()> {
     // Support "--dangerously-skip-permissions --help" probe — just succeed.
     if args.iter().any(|a| a == "--help") {
         println!("fake-claude — test fixture");
+        println!("Options:");
+        println!("  --dangerously-skip-permissions  Bypass all permission prompts.");
+        println!("  -p, --print <prompt>            One-shot mode.");
+        println!("  --add-dir <dir>                 Additional directory to allow.");
+        println!("  --output-format <fmt>           'stream-json' for structured events.");
         return Ok(());
     }
     // The only argument we care about is the phase name, passed via

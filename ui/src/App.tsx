@@ -31,7 +31,11 @@ export function App() {
     const resp = await classifyWorkdir(path)
     setSafety(resp.verdict)
     if (resp.verdict.level === 'blocked') return
-    if (!preflight) return
+    // Only advance if preflight is fully green. Welcome's "Use this folder"
+    // button is already disabled in that case, but we guard here too so the
+    // invariant holds even when tests or future code paths call this
+    // directly.
+    if (!preflight?.all_ok) return
     setScreen({ kind: 'goal', workdir: path, preflight })
   }
 
@@ -65,6 +69,7 @@ export function App() {
             workdir={screen.workdir}
             preflight={screen.preflight}
             onStart={onStart}
+            onBack={() => setScreen({ kind: 'welcome' })}
           />
         )}
         {screen.kind === 'running' && (

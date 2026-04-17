@@ -14,6 +14,10 @@ export function Welcome(props: {
   const claudeOk =
     preflight?.claude?.supports_auto_approve === true
   const codexOk = preflight?.codex?.supports_auto_approve === true
+  const preflightGreen = Boolean(preflight?.all_ok)
+  const safetyOk = !safety || safety.level === 'ok' || safety.level === 'soft_warn'
+  const canProceed =
+    pathInput.trim().length > 0 && preflightGreen && safetyOk
 
   return (
     <section className="welcome">
@@ -81,11 +85,26 @@ export function Welcome(props: {
           <button
             type="button"
             onClick={() => onChooseWorkdir(pathInput.trim())}
-            disabled={!pathInput.trim()}
+            disabled={!canProceed}
+            title={
+              !preflightGreen
+                ? 'Preflight is not green — resolve CLI issues above first'
+                : !pathInput.trim()
+                ? 'Enter a workspace path'
+                : !safetyOk
+                ? 'Workspace path is blocked or requires confirmation'
+                : undefined
+            }
           >
             Use this folder
           </button>
         </div>
+        {!preflightGreen && (
+          <p className="hint error" style={{ marginTop: 8 }}>
+            Preflight isn't green yet — the Start button will stay disabled
+            until both CLIs are found and support an auto-approve flag.
+          </p>
+        )}
         {safety && <SafetyNotice verdict={safety} />}
       </div>
     </section>

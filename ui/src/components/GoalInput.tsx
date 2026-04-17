@@ -9,6 +9,7 @@ export function GoalInput(props: {
   workdir: string
   preflight: PreflightReport
   onStart: (goal: string) => void
+  onBack: () => void
 }) {
   const [goal, setGoal] = useState('')
   const valid = useMemo(() => validateGoal(goal), [goal])
@@ -50,6 +51,9 @@ export function GoalInput(props: {
           )}
         </div>
         <div className="row">
+          <button type="button" onClick={props.onBack}>
+            ← Back
+          </button>
           <button
             type="button"
             className="primary"

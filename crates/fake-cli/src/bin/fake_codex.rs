@@ -13,6 +13,9 @@ fn main() -> anyhow::Result<()> {
     }
     if args.iter().any(|a| a == "--help") {
         println!("fake-codex — test fixture");
+        println!("Options:");
+        println!("  --dangerously-bypass-approvals-and-sandbox   Skip all approvals.");
+        println!("  exec <prompt>                                One-shot exec mode.");
         return Ok(());
     }
 
