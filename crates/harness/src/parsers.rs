@@ -100,6 +100,11 @@ pub fn extract_json_block(text: &str) -> Option<serde_json::Value> {
 pub struct GoalCheckOutput {
     pub done: bool,
     pub missing: Vec<String>,
+    /// Items both agents have agreed to disagree on (see PRD §6.6 and
+    /// common prompt). Empty when no disagreement has been shelved.
+    /// Available from v1.3+; older goal-check JSON blobs without this
+    /// key deserialise with an empty vec.
+    pub shelved: Vec<String>,
     pub next_state: String,
     pub rationale: String,
 }
@@ -110,6 +115,15 @@ pub fn parse_goal_check(text: &str) -> Option<GoalCheckOutput> {
     let done = v.get("done").and_then(|x| x.as_bool())?;
     let missing = v
         .get("missing")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let shelved = v
+        .get("shelved")
         .and_then(|x| x.as_array())
         .map(|a| {
             a.iter()
@@ -130,6 +144,7 @@ pub fn parse_goal_check(text: &str) -> Option<GoalCheckOutput> {
     Some(GoalCheckOutput {
         done,
         missing,
+        shelved,
         next_state,
         rationale,
     })
@@ -263,6 +278,27 @@ mod tests {
         let g = parse_goal_check(text).unwrap();
         assert!(!g.done);
         assert_eq!(g.missing.len(), 2);
+    }
+
+    #[test]
+    fn goal_check_parses_shelved_field_v1_3() {
+        let text = r#"{"done": true, "missing": [],
+                       "shelved": ["use Result instead of exceptions",
+                                   "flat vs nested config keys"],
+                       "next_state": "DONE",
+                       "rationale": "goal met; 2 items shelved"}"#;
+        let g = parse_goal_check(text).unwrap();
+        assert!(g.done);
+        assert_eq!(g.shelved.len(), 2);
+        assert_eq!(g.shelved[0], "use Result instead of exceptions");
+    }
+
+    #[test]
+    fn goal_check_without_shelved_defaults_empty() {
+        // Pre-v1.3 goal_check JSON must still parse.
+        let text = r#"{"done": false, "missing": ["a"], "next_state": "REFINING"}"#;
+        let g = parse_goal_check(text).unwrap();
+        assert!(g.shelved.is_empty());
     }
 
     #[test]

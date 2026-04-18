@@ -60,6 +60,11 @@ pub struct SessionMeta {
     pub children: Vec<ChildProcessRecord>,
     /// Seconds-of-no-heartbeat threshold currently in effect.
     pub stall_threshold_secs: u64,
+    /// RFC3339 timestamp the orchestrator should auto-resume at if this
+    /// session is PAUSED due to a provider rate-limit. `None` when not
+    /// rate-limited or when no specific time was parseable. Added v1.3.
+    #[serde(default)]
+    pub retry_at: Option<String>,
 }
 
 impl SessionMeta {
@@ -76,6 +81,7 @@ impl SessionMeta {
             workdir,
             children: Vec::new(),
             stall_threshold_secs: 600,
+            retry_at: None,
         }
     }
 

@@ -1181,6 +1181,12 @@ next_state rules:
 | 67 | GOAL_CHECK 每轮触发（v1.2） | 原：只在 Codex `Approved` 后进 GoalCheck；实测 Codex 连续 changes_requested 100+ 轮，UI Remaining 一直 "waiting for first goal check"。改：`ReviewParsed` 的 `Approved \| ChangesRequested` 都触发 `GoalCheck`，保留 `Blocked` 走 Refining（review 本身坏的退路）。代价：每轮 +2 CLI（两个 agent 并行），换每 2-10 分钟一次的「距离目标」刷新。DONE 判据不变（两 agent 都 `done=true`）。 | §5、§6.6 |
 | 68 | Resume 按钮（v1.2） | PAUSED 后 Running view 的 Play 按钮重新亮起为 Resume，点击调 `startSession(goal, workdir)`。`AppState::start` 幂等——既有 session 目录被复用，Orchestrator 重建后 reducer 从磁盘 load 回到 PAUSED 前状态继续。 | §6.4 |
 | 69 | 乐观 Pause/Stop 反馈（v1.2） | 点击 Pause/Stop 后，`pausing`/`stopping` 本地状态立刻翻 true，标题栏显示 `PAUSING…` / `STOPPING…`，直到 `state_changed` 事件带回真实 `PAUSED`/`ABANDONED` 再翻回 false。之前 UI 完全无反馈，orchestrator 要 5-10s 才 SIGINT 子进程完成 turn 再 pause，用户以为按钮坏了。 | §6.1 |
+| 70 | Agent 间分歧协议（v1.3） | prompt 引入 `accepted/partial/rejected/shelved` 四态响应。Claude 可以技术理由拒绝 Codex 的建议；Codex 下轮必须让步或拿新论据。连续 2 轮同一项无新论据 → 任一方可搁置到 PRD 的 `## Shelved disagreements` 段。DONE 允许 shelved 非空。状态机的「两 agent 都 done=true」语义不变。 | common.md、refining.md、reviewing.md、goal-check.md |
+| 71 | PRD 作活文档（v1.3） | planning/implementing/refining prompt 都允许在本轮更新 PRD（现状变迁、设计漂移、milestone 勾选）。`GOAL.md` 永不可改。目标是让 PRD 随实现推进保持为当前设计的准确快照，而非累积性堆积。 | planning.md、implementing.md、refining.md |
+| 72 | Rate-limit 识别（v1.3） | runner classify 新增 `is_rate_limit()` 扫 `you've hit your usage limit` / `rate limit` / `quota exceeded` / `Retry-After:` 等关键词，新 `TurnOutcome::RateLimited`，优先级在 Crashed 之上（Codex 退出码 0 但只打 ERROR 这种场景不再被当 Ok）。`parse_retry_at()` 从 `try again at 4:08 AM` / `Retry-After: <secs>` 抽具体恢复时间。 | §16.8 |
+| 73 | RateLimited 路由到 PAUSED（v1.3） | 不走 ERRORED 而走 PAUSED，`retry_at` 存 SessionMeta。新 `StateCommand::RateLimited { agent, retry_at }`，reducer 转 PAUSED + NotifyAttention。orchestrator `handle_turn_result` 检测 outcome=RateLimited 时先发 RateLimited 命令再发 TurnFinished。 | §16.8 |
+| 74 | 自动恢复调度器（v1.3） | AppState 在 orchestrator 退出后检查磁盘 session.json，若 state=PAUSED 且 retry_at 存在则起一个 tokio 任务在该时间唤醒并重新调用 `start(goal, workdir)`。运行中若检测到 guard 已被用户其他操作替换，则 no-op。 | §16.12 |
+| 75 | REVIEWING 必须产新 review 文件（v1.3） | 原 `output_well_formed` 只查"有 review 存在"，不查"本轮写了新的"。Codex rate-limit 退出 0 但没写 → 旧 v28 还在 → 被当 Ok → orchestrator 重新 `ReviewParsed` 旧内容 → round 空转。修法：run_turn 进 Reviewing 前记 `pre_turn_max`，结束后若 `post_max <= pre_max` 则强制 `outcome = OutputMalformed`。 | §16.8 |
 
 ---
 

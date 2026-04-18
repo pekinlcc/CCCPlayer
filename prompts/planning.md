@@ -11,8 +11,8 @@ SURVEY the current state:
 - Never assume an empty workspace; never plan to scrap existing code
   unless `GOAL.md` explicitly requires it.
 
-Task for this turn: produce or update `PRD.md` so it fully specifies how to
-reach `GOAL.md` FROM THE CURRENT STATE. `PRD.md` is the single design
+Task for this turn: produce or update `PRD.md` so it fully specifies how
+to reach `GOAL.md` FROM THE CURRENT STATE. `PRD.md` is the single design
 document; later turns will implement code against it.
 
 Required top-level headings (in order):
@@ -30,11 +30,27 @@ Required top-level headings (in order):
                      redesigning.
 6. Milestones      — ordered checklist of shippable increments, starting
                      from Current state and ending at `GOAL.md`.
-7. Open Questions  — anything you could not decide; empty list is fine.
+7. Shelved disagreements — items Claude and Codex have agreed to
+                     disagree on (see session rules in common prompt).
+                     Preserve existing entries verbatim. Empty list is
+                     fine when no disagreement has been shelved yet.
+8. Open Questions  — anything you could not decide; empty list is fine.
 
-If `PRD.md` already exists, revise it in place; preserve prior decisions
-unless newly contradicted. If `codex_review_v*.md` files exist, read the
-highest-numbered one and fold any PRD-level feedback into this revision.
+Guidelines for keeping `PRD.md` a living document:
+
+- If `PRD.md` already exists, revise it in place; preserve prior
+  decisions unless newly contradicted by reality (review feedback,
+  implementation discoveries, or user clarifications).
+- When a milestone is done, check it off in the Milestones section.
+  When one becomes irrelevant or reveals a better path, rewrite it.
+- Keep Current state factual and current — update it when code has
+  moved on; stale "Current state" misleads the next review.
+- When a `codex_review_v*.md` exists, read the highest-numbered one
+  (including its `## Claude Code 回应` section) and fold PRD-level
+  feedback into this revision.
+- Keep the document concise. If the design has stabilized, trim prose
+  in favor of bullets. Aim for a reader to grasp the design in under 5
+  minutes.
 
 Write `PRD.md` atomically (temp file + rename). Do not modify any other
 file in this turn.

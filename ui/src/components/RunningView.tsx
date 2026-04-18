@@ -59,6 +59,9 @@ export function RunningView(props: {
   // block. Updated whenever a goal_check event lands. See PRD §6.1 / §7.
   const [claudeGc, setClaudeGc] = useState<GoalCheckSnapshot | null>(null)
   const [codexGc, setCodexGc] = useState<GoalCheckSnapshot | null>(null)
+  // RFC3339 timestamp when a rate-limited session will auto-resume.
+  // Cleared once sessionState leaves PAUSED. Added v1.3.
+  const [retryAt, setRetryAt] = useState<string | null>(null)
   const rawScrollRef = useRef<HTMLPreElement | null>(null)
 
   useEffect(() => {
@@ -107,6 +110,14 @@ export function RunningView(props: {
           const outcome = String((ev as { outcome?: string }).outcome ?? '')
           if (FAILING_OUTCOMES.has(outcome)) setFailCount((n) => n + 1)
         }
+        if (k === 'note') {
+          // The RateLimited reducer branch emits a Note like
+          // "codex rate-limited; auto-resume at 2026-04-18T04:08:00Z".
+          // Parse out the RFC3339 timestamp for the countdown pill.
+          const msg = String((ev as { message?: string }).message ?? '')
+          const m = /auto-resume at\s+(\S+)/i.exec(msg)
+          if (m) setRetryAt(m[1])
+        }
         if (k === 'goal_check') {
           const agent = String((ev as { agent?: string }).agent ?? '')
           const snap: GoalCheckSnapshot = {
@@ -117,6 +128,7 @@ export function RunningView(props: {
               (ev as { missing?: string[] }).missing ??
               // Older logs (pre-v1.1) only carry missing_count; fall back.
               [],
+            shelved: (ev as { shelved?: string[] }).shelved ?? [],
             rationale: String((ev as { rationale?: string }).rationale ?? ''),
           }
           if (agent === 'claude') setClaudeGc(snap)
@@ -162,6 +174,8 @@ export function RunningView(props: {
   useEffect(() => {
     if (sessionState === 'PAUSED') setPausing(false)
     if (sessionState === 'ABANDONED') setStopping(false)
+    // Clear the retry pill once we're no longer paused.
+    if (sessionState !== 'PAUSED') setRetryAt(null)
   }, [sessionState])
 
   const sinceLastActivity = useMemo(() => {
@@ -292,6 +306,11 @@ export function RunningView(props: {
           {formatSince(sinceLastActivity)}
         </span>
         {failCount > 0 && <span className="pill danger">{failCount} fail</span>}
+        {sessionState === 'PAUSED' && retryAt && (
+          <span className="pill warn" title={`Auto-resume at ${retryAt}`}>
+            ⏳ auto-resume {formatCountdown(retryAt, nowTick)}
+          </span>
+        )}
         <span className="spacer" />
         <div className="meters">
           <Meter label="CLAUDE" active={claudeTokens > 0 || phase !== 'REVIEWING'} />
@@ -487,6 +506,27 @@ function formatRawTs(iso: string): string {
   }
 }
 
+// Countdown string from now to an RFC3339 target. Refreshes at the 1Hz
+// cadence driven by `nowTick` (we take nowTick as a dependency so React
+// re-renders once a second). Added v1.3 for rate-limit auto-resume UX.
+function formatCountdown(iso: string, _nowTick: number): string {
+  void _nowTick
+  try {
+    const target = new Date(iso).getTime()
+    const diffMs = target - Date.now()
+    if (diffMs <= 0) return 'any moment…'
+    const secs = Math.floor(diffMs / 1000)
+    const h = Math.floor(secs / 3600)
+    const m = Math.floor((secs % 3600) / 60)
+    const s = secs % 60
+    if (h > 0) return `in ${h}h ${m}m`
+    if (m > 0) return `in ${m}m ${s}s`
+    return `in ${s}s`
+  } catch {
+    return ''
+  }
+}
+
 // ─── Remaining to goal (v1.1) ─────────────────────────────────────────────
 //
 // Dual-column view of the latest goal-check result from each agent, plus an
@@ -520,6 +560,12 @@ function RemainingBlock(props: {
 
   const badge = agreementBadge(claude, codex)
 
+  // Items both agents have agreed to shelve appear in EITHER snapshot's
+  // shelved[]; dedupe to show a single list. Each of these is a
+  // philosophical standoff Claude and Codex documented in PRD and
+  // agreed to ship around.
+  const combinedShelved = mergeShelved(claude, codex)
+
   return (
     <div className="remaining">
       <div className="rhead">
@@ -530,8 +576,41 @@ function RemainingBlock(props: {
         <RemainingColumn agent="claude" snap={claude} />
         <RemainingColumn agent="codex" snap={codex} />
       </div>
+      {combinedShelved.length > 0 && (
+        <div className="shelved-block">
+          <div className="shelved-head">
+            <span className="lbl">■ Shelved (both agreed)</span>
+            <span className="dim">
+              {combinedShelved.length} item{combinedShelved.length > 1 ? 's' : ''}
+            </span>
+          </div>
+          <ol className="shelved-list">
+            {combinedShelved.slice(0, 6).map((item, i) => (
+              <li key={i}>{item}</li>
+            ))}
+            {combinedShelved.length > 6 && (
+              <li className="dim">+ {combinedShelved.length - 6} more…</li>
+            )}
+          </ol>
+        </div>
+      )}
     </div>
   )
+}
+
+function mergeShelved(
+  a: GoalCheckSnapshot | null,
+  b: GoalCheckSnapshot | null,
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const s of [...(a?.shelved ?? []), ...(b?.shelved ?? [])]) {
+    const key = s.trim().toLowerCase()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(s)
+  }
+  return out
 }
 
 function RemainingColumn(props: {

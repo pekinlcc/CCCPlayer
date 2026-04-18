@@ -18,19 +18,41 @@
 
 ## English
 
-### What's new in v1.2 (2026-04-18)
+### What's new in v1.3 (2026-04-18)
 
-- **GOAL_CHECK now runs after every REVIEWING.** The Remaining-to-goal
-  panel no longer stays stuck at "waiting for first goal check" for
-  hundreds of rounds. Every review cycle launches both agents' goal
-  checks in parallel and pushes fresh missing lists + rationale into
-  the panel. DONE still gates on both independently saying `done=true`.
-- **Resume button.** Once paused, the triangle Play button lights up as
-  Resume so you can continue without losing session state.
-- **Optimistic Pause / Stop feedback.** The title bar now shows
-  `⏸ PAUSING…` / `■ STOPPING…` the instant you click, instead of
-  pretending nothing happened for the 5–10s it takes the orchestrator
-  to actually unwind the current turn.
+- **Agents can now disagree.** Prompts rewritten: Claude can reject a
+  Codex finding with a concrete technical reason (not just "I
+  disagree"); Codex must then either concede or counter-argue with new
+  info. After 2 rounds of no new argument, either side may SHELVE the
+  item to a dedicated PRD section and both move on. DONE is allowed
+  with non-empty shelved — the contract is "close everything both
+  agree on, ship around philosophical standoffs".
+- **PRD is a living document.** Implementing and refining prompts now
+  let agents update `PRD.md` mid-stream when implementation reveals a
+  design gap. `GOAL.md` stays immutable; everything else serves the
+  goal.
+- **Codex quota detection → auto-pause + auto-resume.** The ~6:1
+  round/review zombie loop from last run (Codex hit its 5-hour quota
+  at round 30, kept exiting 0 with only an ERROR line, orchestrator
+  kept re-ingesting stale review v28) is fixed at three layers:
+  (1) new `TurnOutcome::RateLimited` catches "you've hit your usage
+  limit" / `Retry-After:` patterns,
+  (2) reducer routes RateLimited to PAUSED with `retry_at` parked on
+  session meta,
+  (3) AppState schedules a tokio task that wakes at `retry_at` and
+  re-invokes Start. UI shows a live "⏳ auto-resume in 2h 13m" pill.
+- **REVIEWING must write a new review file.** If Codex "completes" a
+  review without producing `codex_review_v{N+1}.md`, outcome is forced
+  to OutputMalformed regardless of exit code. No more silent spinning.
+- **Shelved block** in the Remaining-to-goal panel shows items both
+  agents agreed to shelve.
+
+### v1.2 recap
+
+- GOAL_CHECK now runs after every REVIEWING (not only when Codex
+  approves); Remaining panel refreshes every 2–10 minutes.
+- Resume button after pause.
+- Optimistic `⏸ PAUSING…` / `■ STOPPING…` title-bar feedback.
 
 ### v1.1 recap
 
@@ -81,8 +103,8 @@ Latest Apple Silicon build lives in [`dist/`](dist/):
 
 | File | Size | Use |
 | --- | --- | --- |
-| [`CCCPlayer-1.2.0-arm64.dmg`](dist/CCCPlayer-1.2.0-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
-| [`CCCPlayer-1.2.0-arm64.app.tar.gz`](dist/CCCPlayer-1.2.0-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
+| [`CCCPlayer-1.3.0-arm64.dmg`](dist/CCCPlayer-1.3.0-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
+| [`CCCPlayer-1.3.0-arm64.app.tar.gz`](dist/CCCPlayer-1.3.0-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
 
 Apple Silicon only for now (M1/M2/M3/M4). Intel builds can be produced from
 source (see *Build from source* below).
@@ -219,16 +241,34 @@ This is a personal project — open a PR or file an Issue on GitHub.
 
 ## 中文说明
 
-### v1.2 新增（2026-04-18）
+### v1.3 新增（2026-04-18）
 
-- **每次 REVIEWING 完都跑 GOAL_CHECK**（之前要 Codex Approved 才跑，导致
-  实测时 167 轮还一直「waiting for first goal check」）。现在每个 review
-  cycle 尾部并行跑两个 agent 的 goal-check，Remaining 面板 2-10 分钟刷一次
-  新鲜的「还差什么」。DONE 的判定不变——仍然是双方都 `done=true`。
-- **Resume 按钮**。session 进 PAUSED 后，播放器的三角 Play 按钮重新亮起
-  变 Resume，点击就从当前状态继续跑，不会丢 session。
-- **Pause / Stop 点下去立刻有反馈**——标题栏瞬间切到 `⏸ PAUSING…` /
-  `■ STOPPING…`，不再出现"点完 5-10 秒啥都不动"的错觉。
+- **两个 agent 现在可以真正意义上分歧**。prompt 全面重写：Claude 可以
+  技术理由**明确拒绝** Codex 的建议（「性能开销 X」、「API 约束 Y」，不允许
+  只写「我不同意」）；Codex 接收后要么让步、要么拿新论据继续 block。连续 2
+  轮没有新论据，任一方可**搁置**该项到 PRD 的 `## Shelved disagreements`
+  段，双方都不能再以此 block。DONE 允许 shelved 非空——只要没达成一致的部分
+  都有明确记录。
+- **PRD 是活文档**。implementing / refining prompt 现在明确允许 agent 在实现
+  过程中更新 `PRD.md`（现状变了、设计决策修正等），`GOAL.md` 永不可改。
+- **Codex 配额耗尽自动暂停+自动恢复**。上一轮实测的 166 轮 vs 28 review 僵死
+  循环（Codex round 30 起一直报 usage limit 但退出码 0，orchestrator 把旧的
+  v28 review 当新的反复吃）在三层都修了：
+  (1) runner 识别 `"you've hit your usage limit"` / `Retry-After:` 等关键词
+  产生新的 `TurnOutcome::RateLimited`；
+  (2) reducer 把 RateLimited 路由到 PAUSED，retry_at 存入 session meta；
+  (3) AppState 启一个 tokio 定时器，到点自动调 Start 恢复。UI 上有实时倒计时
+  `⏳ auto-resume in 2h 13m` 小标签。
+- **REVIEWING 必须产生新 review 文件**。Codex 跑完没写 `codex_review_v{N+1}.md`
+  直接降级为 OutputMalformed，不管退出码。再也不会闷头转。
+- **Shelved 区块**在 Remaining-to-goal 面板里显示双方搁置的项。
+
+### v1.2 回顾
+
+- 每次 REVIEWING 完都跑 GOAL_CHECK（不再等 Codex Approved），Remaining 面板
+  2-10 分钟刷一次。
+- Pause 之后出现 Resume 按钮。
+- Pause/Stop 乐观反馈——点下去立刻 `⏸ PAUSING…` / `■ STOPPING…`。
 
 ### v1.1 回顾
 
@@ -276,8 +316,8 @@ codex login
 
 | 文件 | 大小 | 用途 |
 | --- | --- | --- |
-| [`CCCPlayer-1.2.0-arm64.dmg`](dist/CCCPlayer-1.2.0-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
-| [`CCCPlayer-1.2.0-arm64.app.tar.gz`](dist/CCCPlayer-1.2.0-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
+| [`CCCPlayer-1.3.0-arm64.dmg`](dist/CCCPlayer-1.3.0-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
+| [`CCCPlayer-1.3.0-arm64.app.tar.gz`](dist/CCCPlayer-1.3.0-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
 
 目前只有 Apple Silicon（M1/M2/M3/M4）版本。Intel 可以自己编（见下方「从源码编译」）。
 

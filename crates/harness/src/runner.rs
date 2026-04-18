@@ -281,6 +281,14 @@ impl HarnessRunner {
             input.agent,
         );
 
+        // For rate-limit outcomes, try to salvage a retry-at timestamp
+        // from the tail so the orchestrator can schedule auto-resume.
+        let retry_at = if matches!(outcome, TurnOutcome::RateLimited) {
+            parse_retry_at(&stdout_tail).or_else(|| parse_retry_at(&stderr_tail))
+        } else {
+            None
+        };
+
         Ok(TurnResult {
             agent: input.agent,
             phase: input.phase,
@@ -289,6 +297,7 @@ impl HarnessRunner {
             duration_ms,
             stdout_tail,
             stderr_tail,
+            retry_at,
         })
     }
 }
@@ -302,10 +311,16 @@ fn classify(
     phase: Phase,
     agent: Agent,
 ) -> TurnOutcome {
-    // Order matters per §16.8: auth_failed > refused > stalled > crashed >
-    // output_malformed > ok.
+    // Order (v1.3): auth_failed > rate_limited > refused > stalled >
+    // crashed > output_malformed > ok. rate_limited sits above crashed
+    // because real-world CLIs (e.g. codex exec on quota exhaustion) often
+    // exit 0 while only printing an ERROR line to stdout — the outcome
+    // classifier must catch that before it falls through to `Ok`.
     if is_auth_failure(stderr) || is_auth_failure(stdout) {
         return TurnOutcome::AuthFailed;
+    }
+    if is_rate_limit(stdout) || is_rate_limit(stderr) {
+        return TurnOutcome::RateLimited;
     }
     if exit_code == Some(0) && is_refusal(stdout) && !files_touched(workdir, phase) {
         return TurnOutcome::Refused;
@@ -320,6 +335,63 @@ fn classify(
         return TurnOutcome::OutputMalformed;
     }
     TurnOutcome::Ok
+}
+
+/// Substring match for known rate-limit / quota-exhaustion signatures
+/// from Claude Code 2.x and Codex 0.1x. Case-insensitive.
+pub fn is_rate_limit(text: &str) -> bool {
+    let s = text.to_lowercase();
+    const NEEDLES: &[&str] = &[
+        "you've hit your usage limit",       // codex exec
+        "hit your usage limit",
+        "usage limit",
+        "rate limit",
+        "rate-limit",
+        "429 too many requests",
+        "quota exceeded",
+        "quota has been exhausted",
+        "model rate limit reached",          // claude
+        "retry-after:",
+    ];
+    NEEDLES.iter().any(|n| s.contains(n))
+}
+
+/// Best-effort extraction of a resume-at timestamp from a rate-limit
+/// message. Matches common formats like `try again at 4:08 AM` or
+/// `Retry-After: 3600`. Returns `None` if no specific time was quoted.
+pub fn parse_retry_at(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{Duration, Local, NaiveTime, TimeZone, Utc};
+    // Pattern A: "try again at 4:08 AM" (Codex). Interpret local tz; if the
+    // time is earlier than now, bump by one day.
+    let re = regex::Regex::new(
+        r"(?i)try again at\s+(\d{1,2}:\d{2}\s*(?:AM|PM))",
+    )
+    .ok()?;
+    if let Some(cap) = re.captures(text) {
+        let raw = cap.get(1)?.as_str().to_uppercase().replace(' ', "");
+        if let Ok(t) = NaiveTime::parse_from_str(&raw, "%l:%M%p")
+            .or_else(|_| NaiveTime::parse_from_str(&raw, "%I:%M%p"))
+        {
+            let now_local = Local::now();
+            let mut target = now_local
+                .date_naive()
+                .and_time(t);
+            if target <= now_local.naive_local() {
+                target += Duration::days(1);
+            }
+            if let Some(local_dt) = Local.from_local_datetime(&target).single() {
+                return Some(local_dt.with_timezone(&Utc));
+            }
+        }
+    }
+    // Pattern B: "Retry-After: 3600" (seconds).
+    let re = regex::Regex::new(r"(?i)retry-after:\s*(\d+)").ok()?;
+    if let Some(cap) = re.captures(text) {
+        if let Ok(secs) = cap.get(1)?.as_str().parse::<i64>() {
+            return Some(Utc::now() + Duration::seconds(secs));
+        }
+    }
+    None
 }
 
 fn output_well_formed(workdir: &Path, phase: Phase, stdout: &str, agent: Agent) -> bool {

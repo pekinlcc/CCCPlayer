@@ -35,18 +35,30 @@ pub enum StateCommand {
     },
     /// Goal-Check returned for one agent. The full `missing` list and
     /// `rationale` are carried through so the UI can show a side-by-side
-    /// "distance to goal" view (v1.1+).
+    /// "distance to goal" view (v1.1+). `shelved` was added in v1.3 for
+    /// items both agents agreed to disagree on.
     GoalCheckResult {
         agent: Agent,
         done: bool,
         missing_count: u32,
         missing: Vec<String>,
+        shelved: Vec<String>,
         rationale: String,
     },
     /// External event required immediate pause.
     ForcePause { reason: String },
     /// Harness reports authentication failure.
     AuthFailed { agent: Agent },
+    /// Harness reports the CLI's provider-side rate/usage limit has been
+    /// exhausted. Unlike `AuthFailed`, this self-heals when the provider's
+    /// window rolls over. Added v1.3 — see PRD §16.8.
+    RateLimited {
+        agent: Agent,
+        /// RFC3339 time the CLI said it could be retried, if any was
+        /// parseable from the error. `None` means "unknown window; user
+        /// must hit Resume manually once things unclog".
+        retry_at: Option<String>,
+    },
 }
 
 /// Side effects produced by the reducer. Consumers perform these outside the
@@ -182,6 +194,30 @@ impl Reducer {
                     reason: "CLI reported authentication failure; please re-login".into(),
                 });
             }
+            StateCommand::RateLimited { agent, retry_at } => {
+                if matches!(self.meta.state, SessionState::Running) {
+                    effects.push(Effect::CancelCurrent);
+                }
+                self.meta.retry_at = retry_at.clone();
+                self.transition(&mut effects, SessionState::Paused, self.meta.phase);
+                let reason = match (agent, retry_at.as_deref()) {
+                    (Agent::Claude, Some(t)) => {
+                        format!("claude rate-limited; auto-resume at {t}")
+                    }
+                    (Agent::Codex, Some(t)) => {
+                        format!("codex rate-limited; auto-resume at {t}")
+                    }
+                    (Agent::Claude, None) => {
+                        "claude rate-limited; resume when provider window rolls over"
+                            .to_string()
+                    }
+                    (Agent::Codex, None) => {
+                        "codex rate-limited; resume when provider window rolls over"
+                            .to_string()
+                    }
+                };
+                effects.push(Effect::NotifyAttention { reason });
+            }
             StateCommand::TurnFinished { agent, phase, outcome } => {
                 self.track_retry(agent, outcome);
                 // Per §16.3 and §16.8: some outcomes retry once before giving up.
@@ -226,6 +262,20 @@ impl Reducer {
                         self.transition(&mut effects, SessionState::Paused, phase);
                         effects.push(Effect::NotifyAttention {
                             reason: "authentication failure".into(),
+                        });
+                    }
+                    TurnOutcome::RateLimited => {
+                        // Rate-limit is recoverable: pause with the
+                        // retry_at from meta (set by the orchestrator
+                        // dispatching StateCommand::RateLimited before
+                        // handling TurnFinished). Caller is expected to
+                        // route RateLimited via StateCommand::RateLimited
+                        // *first*, but if it slips in as a raw
+                        // TurnFinished we still want to pause (not
+                        // Errored) so the session can self-heal.
+                        self.transition(&mut effects, SessionState::Paused, phase);
+                        effects.push(Effect::NotifyAttention {
+                            reason: "rate-limited".into(),
                         });
                     }
                     TurnOutcome::Refused
@@ -298,6 +348,7 @@ impl Reducer {
                 done,
                 missing_count,
                 missing,
+                shelved,
                 rationale,
             } => {
                 effects.push(Effect::Emit(Event::new(
@@ -307,6 +358,7 @@ impl Reducer {
                         done,
                         missing_count,
                         missing,
+                        shelved,
                         rationale,
                     },
                 )));
@@ -524,6 +576,7 @@ mod tests {
             done: true,
             missing_count: 0,
             missing: Vec::new(),
+            shelved: Vec::new(),
             rationale: String::new(),
         });
         let eff = r.handle(StateCommand::GoalCheckResult {
@@ -531,6 +584,7 @@ mod tests {
             done: true,
             missing_count: 0,
             missing: Vec::new(),
+            shelved: Vec::new(),
             rationale: String::new(),
         });
         assert!(matches!(r.meta().state, SessionState::Done));

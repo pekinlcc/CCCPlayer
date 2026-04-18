@@ -89,7 +89,42 @@ impl AppState {
             }
         });
 
-        let handle = tokio::spawn(async move { orch.run(events_tx).await });
+        // Spawn the orchestrator. When it returns (because the session
+        // paused / errored / finished), check the persisted session meta
+        // for a rate-limit retry_at; if one is recorded, schedule an
+        // auto-resume task that fires at that time and re-invokes start.
+        let workdir_for_wait = workdir.clone();
+        let goal_for_wait = goal.clone();
+        let app_for_wait = app.clone();
+        let running_for_wait = self.running.clone();
+        let handle = tokio::spawn(async move {
+            let result = orch.run(events_tx).await;
+            // Inspect the session meta on disk to see whether we paused
+            // on a rate-limit. `Session::open` would re-acquire the flock
+            // so we read raw JSON here instead.
+            let meta_path = workdir_for_wait.join(".cccplayer/session.json");
+            if let Ok(body) = std::fs::read_to_string(&meta_path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                    let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("");
+                    let retry_at = v
+                        .get("retry_at")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                    if state == "PAUSED" {
+                        if let Some(retry_at_str) = retry_at {
+                            schedule_auto_resume(
+                                app_for_wait,
+                                running_for_wait,
+                                workdir_for_wait,
+                                goal_for_wait,
+                                retry_at_str,
+                            );
+                        }
+                    }
+                }
+            }
+            result
+        });
         *guard = Some(RunningSession {
             workdir,
             handle,
@@ -121,6 +156,66 @@ impl Default for AppState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Schedule a tokio task that wakes at `retry_at_rfc3339` and re-invokes
+/// `AppState::start` with the recorded (workdir, goal). If the user has
+/// stopped or started a different session in the meantime we bail out.
+/// Added v1.3 for rate-limit self-healing.
+fn schedule_auto_resume(
+    app: AppHandle,
+    running: Arc<Mutex<Option<RunningSession>>>,
+    workdir: PathBuf,
+    goal: String,
+    retry_at_rfc3339: String,
+) {
+    let Ok(retry_at) = chrono::DateTime::parse_from_rfc3339(&retry_at_rfc3339) else {
+        tracing::warn!(
+            "auto-resume: could not parse retry_at='{retry_at_rfc3339}', giving up"
+        );
+        return;
+    };
+    let retry_at_utc = retry_at.with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    let wait = (retry_at_utc - now).to_std().unwrap_or(Duration::from_secs(60));
+    tracing::info!(
+        "auto-resume scheduled in {:?} (at {retry_at_rfc3339})",
+        wait
+    );
+    tokio::spawn(async move {
+        tokio::time::sleep(wait).await;
+        // Confirm the guard still points at the same paused session we
+        // scheduled for. If user already resumed / stopped / started
+        // somewhere else, don't interfere.
+        {
+            let guard = running.lock().await;
+            match guard.as_ref() {
+                Some(rs)
+                    if rs.workdir == workdir && rs.handle.is_finished() =>
+                {
+                    tracing::info!("auto-resume: firing Start on {:?}", workdir);
+                }
+                _ => {
+                    tracing::info!(
+                        "auto-resume: guard moved on, skipping scheduled fire"
+                    );
+                    return;
+                }
+            }
+        }
+        // Drop the guard then re-enter `start` which takes its own.
+        let cfg = match default_config() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("auto-resume: default_config failed: {e:#}");
+                return;
+            }
+        };
+        let state = AppState { running };
+        if let Err(e) = state.start(app, workdir, goal, cfg).await {
+            tracing::warn!("auto-resume: start failed: {e:#}");
+        }
+    });
 }
 
 /// Default orchestrator config, populated from preflight.

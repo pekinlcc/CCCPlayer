@@ -293,6 +293,7 @@ impl Orchestrator {
                         done: g.done,
                         missing_count: g.missing.len() as u32,
                         missing: g.missing.clone(),
+                        shelved: g.shelved.clone(),
                         rationale: g.rationale.clone(),
                     });
                     self.apply_effects(effs, events_tx).await?;
@@ -303,6 +304,7 @@ impl Orchestrator {
                         done: g.done,
                         missing_count: g.missing.len() as u32,
                         missing: g.missing.clone(),
+                        shelved: g.shelved.clone(),
                         rationale: g.rationale.clone(),
                     });
                     self.apply_effects(effs, events_tx).await?;
@@ -436,6 +438,20 @@ impl Orchestrator {
             stall_threshold: self.config.stall_threshold,
         };
 
+        // Snapshot the latest review version BEFORE the turn runs so we
+        // can detect the case where Codex "completed" a REVIEWING turn
+        // but did not actually produce a new codex_review_v{N+1}.md.
+        // That slips past the per-file output_well_formed check because
+        // an older review still exists and still parses. See decision
+        // #70 in PRD: without this, a Codex that quietly hit rate-limit
+        // and wrote nothing spirals the state machine by re-ingesting
+        // stale reviews as fresh verdicts. Added v1.3.
+        let pre_turn_review_max = if matches!(phase, Phase::Reviewing) {
+            latest_review(self.session.workdir())
+        } else {
+            None
+        };
+
         // Emit AgentStarted.
         let _ = append_event(
             &self.session,
@@ -523,7 +539,13 @@ impl Orchestrator {
                     }
                 }
                 res = &mut runner => {
-                    let result = res?;
+                    let mut result = res?;
+                    require_new_review(
+                        self.session.workdir(),
+                        phase,
+                        pre_turn_review_max,
+                        &mut result,
+                    );
                     let _ = std::fs::write(&transcript_path, &transcript);
                     codex_fallback_usage(
                         agent,
@@ -556,7 +578,13 @@ impl Orchestrator {
             }
         }
         // Got Finished — wait on runner to retrieve the TurnResult.
-        let result = runner.await?;
+        let mut result = runner.await?;
+        require_new_review(
+            self.session.workdir(),
+            phase,
+            pre_turn_review_max,
+            &mut result,
+        );
         let _ = std::fs::write(&transcript_path, &transcript);
         codex_fallback_usage(agent, &transcript, &mut session_usage_delta);
         let _ = append_event(
@@ -619,6 +647,24 @@ impl Orchestrator {
         result: crate::turn::TurnResult,
         events_tx: &mpsc::UnboundedSender<Event>,
     ) -> Result<()> {
+        use cccplayer_core::events::TurnOutcome;
+
+        // Rate-limit is handled through a distinct StateCommand so the
+        // reducer can park `retry_at` on SessionMeta for the auto-resume
+        // scheduler. We still dispatch the TurnFinished afterwards to
+        // keep the per-turn retry counter and missing_history consistent
+        // — the reducer's TurnFinished/RateLimited branch is careful to
+        // transition only if the session is still Running.
+        if matches!(result.outcome, TurnOutcome::RateLimited) {
+            let retry_at = result.retry_at.map(|t| t.to_rfc3339());
+            let effs = self.reducer.handle(StateCommand::RateLimited {
+                agent: result.agent,
+                retry_at,
+            });
+            self.apply_effects(effs, events_tx).await?;
+            return Ok(());
+        }
+
         let cmd = StateCommand::TurnFinished {
             agent: result.agent,
             phase: result.phase,
@@ -691,6 +737,37 @@ fn agent_name(a: Agent) -> &'static str {
 /// `tokens used\n<N>` pair near the end. If the turn produced no structured
 /// usage events, scan the collected transcript for that pattern and apply it
 /// as a one-shot input-token delta. No-op for Claude or if nothing matches.
+/// Reject "silent" REVIEWING turns — ones that classified Ok but did
+/// not actually produce a `codex_review_v{N+1}.md`. This catches Codex
+/// hitting its usage limit and exiting 0 with only an ERROR line, and
+/// any other case where the agent politely did nothing. Without this
+/// the orchestrator re-ingests the *previous* review as if it were
+/// fresh every cycle and round ticks indefinitely (observed in the
+/// wild: 166 rounds vs 28 actual reviews).
+///
+/// No-op for non-Reviewing phases and for outcomes already classified
+/// as a failure or rate-limit — those have their own handling paths.
+fn require_new_review(
+    workdir: &Path,
+    phase: Phase,
+    pre_turn_max: Option<u32>,
+    result: &mut crate::turn::TurnResult,
+) {
+    use cccplayer_core::events::TurnOutcome;
+    if !matches!(phase, Phase::Reviewing) {
+        return;
+    }
+    // Only downgrade Ok-classified turns; other outcomes already
+    // tell a truer story.
+    if !matches!(result.outcome, TurnOutcome::Ok) {
+        return;
+    }
+    let post_turn_max = latest_review(workdir);
+    if post_turn_max <= pre_turn_max {
+        result.outcome = TurnOutcome::OutputMalformed;
+    }
+}
+
 fn codex_fallback_usage(agent: Agent, transcript: &[u8], delta: &mut (u64, u64)) {
     if agent != Agent::Codex {
         return;

@@ -1,5 +1,98 @@
 # CCCPlayer Release Notes
 
+## v1.3.0 · 2026-04-18
+
+Fixes a class of silent bugs where Codex could run for 100+ rounds
+without producing real work (quota exhaustion detection + mandatory new
+review-file requirement). Overhauls agent prompts so Claude and Codex
+can genuinely disagree, debate, and shelve items rather than blindly
+accepting every finding. PRD becomes a living document.
+
+### Prompts (major rewrite)
+
+- **Disagreement protocol**: Claude is no longer required to accept
+  every Codex finding. Four possible responses per blocking item now:
+  `accepted | partial | rejected | shelved`. Rejecting a finding
+  requires a concrete technical reason ("performance X", "API
+  constraint Y"), not "I disagree". After the same item has been
+  rejected-then-re-raised 2 consecutive rounds with no new argument
+  emerging, either agent may mark it SHELVED and both move on.
+- **Shelved disagreements** become a first-class concept. Each is
+  recorded in `PRD.md` under a new `## Shelved disagreements` section
+  with both sides' positions verbatim and a note on why shelving is
+  safe for the goal. Neither agent may re-block on a shelved item.
+- **Consensus-first, then proximity**: the stated philosophy is to
+  close everything both agents agree on, shelve the items they
+  philosophically can't agree on, and declare the goal met when nothing
+  non-shelved remains. DONE is allowed with non-empty `shelved[]` as
+  long as each entry is documented in PRD.
+- **PRD is a living document**: implementing and refining prompts now
+  explicitly allow — and encourage — updating `PRD.md` mid-stream when
+  implementation reveals a design gap. `GOAL.md` remains immutable.
+  Solved milestones get checked off, stale "Current state" gets
+  rewritten. Goal first; everything else is mutable.
+- **Reviewing** now reads the previous review's `## Claude Code 回应`
+  section consciously. For `status=rejected` items, Codex must either
+  concede or produce a new counter-argument; it cannot simply re-paste
+  the same bullet. After 2 rounds of no new argument, Codex MUST shelve.
+- **Goal check JSON** gains a `shelved: string[]` field. Done can be
+  `true` with shelved non-empty.
+
+### Runtime fixes
+
+- **Codex quota exhaustion detected** (was the root cause of the
+  "166 rounds, 28 reviews" zombie loop in real user testing). Runner's
+  classifier now recognises `"you've hit your usage limit"`, `"rate
+  limit"`, `"quota exceeded"`, `"Retry-After:"`, and a few more as a
+  new `TurnOutcome::RateLimited`. This sits above `Crashed` in the
+  precedence order so CLIs that exit 0 while printing an ERROR line
+  (Codex's behaviour on quota) don't slip through as `Ok`.
+- **RateLimited → PAUSED, not ERRORED**. The reducer transitions to
+  PAUSED with a descriptive note and parks `retry_at` on `SessionMeta`
+  so recovery is automatic.
+- **Auto-resume scheduler**. When the orchestrator task finishes and
+  the session is PAUSED with a `retry_at`, AppState spawns a tokio
+  task that wakes at that time and re-invokes `start` with the same
+  `(goal, workdir)`. Respects user intervention: if you stop or start
+  a different session in the meantime, the scheduled resume no-ops.
+- **Parse `try again at 4:08 AM` and `Retry-After: <seconds>`** from
+  the CLI tail so the scheduler has a specific wake time.
+- **Reviewing must write a new `codex_review_v{N+1}.md`**. The
+  orchestrator now snapshots `latest_review()` before each Reviewing
+  turn and, if no higher-numbered file exists after, downgrades the
+  outcome to `OutputMalformed` regardless of exit code. Without this
+  the orchestrator kept re-ingesting the previous (stale) review as a
+  fresh verdict and rounds ticked indefinitely.
+
+### UI
+
+- **Shelved section** in the Remaining-to-goal panel: magenta dashed
+  block below the Claude / Codex columns, listing items both agents
+  agreed to disagree on. Dedup across both snapshots.
+- **Auto-resume countdown pill** in the transport bar whenever the
+  session is PAUSED and a `retry_at` is known: `⏳ auto-resume in 2h 13m`
+  with tooltip showing the absolute time. Updates every second.
+
+### Schema changes (backward compatible)
+
+- `EventKind::GoalCheck` + `StateCommand::GoalCheckResult` gained
+  `shelved: Vec<String>`. Historical events deserialise with empty vec.
+- `SessionMeta` gained `retry_at: Option<String>` (RFC3339). Pre-1.3
+  session.json files parse unchanged.
+- `TurnResult` gained `retry_at: Option<DateTime<Utc>>`.
+
+### Known limitations
+
+- Agent behaviour under the new disagreement protocol depends on how
+  well the underlying models follow the prompt. If Claude or Codex
+  keeps re-raising a shelved item, manual intervention may still be
+  needed — the stagnation detector will catch runaway loops at the
+  reducer level.
+- Quota exhaustion detection only covers known English substrings. A
+  localised error message would still slip through to `Crashed`.
+
+---
+
 ## v1.2.0 · 2026-04-18
 
 Makes the "distance to goal" panel actually update per cycle, fixes the

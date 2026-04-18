@@ -14,6 +14,12 @@ pub struct TurnResult {
     pub duration_ms: u64,
     pub stdout_tail: String,
     pub stderr_tail: String,
+    /// For `TurnOutcome::RateLimited`, the wall-clock time the CLI said
+    /// to retry at (if one was parseable from the error message). Used
+    /// to schedule an auto-resume. `None` means "try again later, we
+    /// don't know when". Added v1.3.
+    #[serde(default)]
+    pub retry_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Patterns that indicate the CLI refused to carry out the task. See §16.8

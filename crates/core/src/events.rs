@@ -73,6 +73,10 @@ pub enum EventKind {
         /// replaying historical logs still works.
         #[serde(default)]
         missing: Vec<String>,
+        /// Shelved disagreements the agent flagged — items both agents
+        /// have agreed to disagree on and ship around. Available v1.3+.
+        #[serde(default)]
+        shelved: Vec<String>,
         /// The `rationale` string the agent produced in the same goal-check
         /// JSON. Useful for showing *why* the agent thinks the goal is (or
         /// isn't) met.
@@ -137,4 +141,10 @@ pub enum TurnOutcome {
     AuthFailed,
     Refused,
     Flapping,
+    /// The CLI reported that this account's rate limit / quota has been
+    /// exhausted. Unlike `AuthFailed`, this is expected to resolve on its
+    /// own when the provider's window rolls over. Orchestrator routes it
+    /// to PAUSED with an optional `retry_at` time so an auto-resume can
+    /// be scheduled. Added in v1.3.
+    RateLimited,
 }

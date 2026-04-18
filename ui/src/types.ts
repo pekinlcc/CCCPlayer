@@ -72,11 +72,12 @@ export interface RawLogLine {
   line: string
 }
 
-// Snapshot of one agent's most recent goal-check output (v1.1+).
+// Snapshot of one agent's most recent goal-check output (v1.1+; shelved v1.3+).
 export interface GoalCheckSnapshot {
   at: string
   round: number
   done: boolean
   missing: string[]
+  shelved: string[]
   rationale: string
 }

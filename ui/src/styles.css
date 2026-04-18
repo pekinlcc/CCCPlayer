@@ -709,6 +709,50 @@ html, body, #root {
 }
 .remaining .rcol-rationale.dim { color: var(--dim); font-style: italic; }
 
+/* Shelved block sits below the two columns. Items here are things
+   both agents agreed to disagree on; tagged magenta to match the
+   "agree to disagree" semantics (distinct from failure red). v1.3. */
+.remaining .shelved-block {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px dashed rgba(255, 47, 214, 0.35);
+  border-radius: 3px;
+  background: rgba(255, 47, 214, 0.03);
+}
+.remaining .shelved-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.remaining .shelved-head .lbl {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--magenta);
+  text-shadow: 0 0 4px rgba(255, 47, 214, 0.4);
+  font-weight: 700;
+}
+.remaining .shelved-head .dim {
+  font-size: 10px;
+  letter-spacing: 1.2px;
+  color: var(--dim);
+}
+.remaining .shelved-list {
+  list-style: disc inside;
+  padding: 0;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  opacity: 0.9;
+}
+.remaining .shelved-list li.dim {
+  list-style: none;
+  color: var(--dim);
+  font-style: italic;
+}
+
 /* ───────── Tokens split KV (v1.1) ─────────────────────────────── */
 .kv.tokens-kv { display: flex; flex-direction: column; gap: 4px; }
 .tokens-split { display: flex; flex-direction: column; gap: 4px; }
