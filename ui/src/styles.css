@@ -140,7 +140,7 @@ html, body, #root {
 /* --- display row --- */
 .dline {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
   margin-bottom: 10px;
 }
@@ -151,11 +151,27 @@ html, body, #root {
   letter-spacing: 1.4px;
   text-transform: uppercase;
   min-width: 58px;
+  padding-top: 2px; /* baseline align with wrapped value */
 }
 .dline .value {
   color: var(--cyan);
   text-shadow: 0 0 6px rgba(0, 229, 255, 0.55);
   font-weight: 600;
+}
+
+/* Track line: allow long goals to wrap across multiple lines; cap
+   height and scroll so a 10 KB goal doesn't push the rest of the
+   display off-screen. `title` on the element shows the full text on
+   hover. v1.3.1. */
+.dline .track-value {
+  flex: 1;
+  min-width: 0;
+  max-height: 4.5em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+  padding: 2px 4px 2px 0;
 }
 .value.magenta { color: var(--magenta); text-shadow: 0 0 8px rgba(255, 47, 214, 0.5); }
 .value.lime    { color: var(--lime);    text-shadow: 0 0 6px rgba(186, 255, 41, 0.5); }

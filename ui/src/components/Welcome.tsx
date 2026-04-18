@@ -63,8 +63,8 @@ export function Welcome(props: {
       <div className="display">
         <div className="dline">
           <span className="label">Track</span>
-          <span className="value magenta">
-            {goal.trim() ? goal.split('\n')[0].slice(0, 60) : '— · — · —'}
+          <span className="value magenta track-value" title={goal}>
+            {goal.trim() || '— · — · —'}
           </span>
         </div>
 
@@ -186,7 +186,7 @@ export function Welcome(props: {
         <span>Workdir</span>
         <code>{workdir.trim() || '—'}</code>
         <span className="spacer" />
-        <span>v1.3.0</span>
+        <span>v1.3.1</span>
       </div>
     </Shell>
   )

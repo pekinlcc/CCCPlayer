@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "cccplayer-app"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "anyhow",
  "cccplayer-core",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "cccplayer-core"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "cccplayer-fake-cli"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "cccplayer-harness"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "anyhow",
  "cccplayer-core",

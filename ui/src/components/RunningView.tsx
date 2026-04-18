@@ -185,7 +185,9 @@ export function RunningView(props: {
 
   const phaseIdx = PHASE_ORDER.indexOf(phase)
 
-  const trackLabel = props.goal.split('\n')[0].slice(0, 60) || 'session'
+  // Full goal string (no truncation) so long targets read all the way
+  // through; CSS wraps it. Fallback to "session" only when goal is empty.
+  const trackLabel = props.goal.trim() || 'session'
 
   // Map reducer-reported SessionState to the shell's status badge. Done /
   // Abandoned / Errored route away via props.onDone, so the only values we
@@ -221,7 +223,9 @@ export function RunningView(props: {
       <div className="display">
         <div className="dline">
           <span className="label">Track</span>
-          <span className="value magenta">{trackLabel}</span>
+          <span className="value magenta track-value" title={props.goal}>
+            {trackLabel}
+          </span>
         </div>
         <div className="dline">
           <span className="label">Folder</span>

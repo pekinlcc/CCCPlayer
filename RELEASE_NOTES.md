@@ -1,5 +1,30 @@
 # CCCPlayer Release Notes
 
+## v1.3.1 · 2026-04-18
+
+Small but visible fixes.
+
+### Fixed
+
+- **Claude token count was ~25× under-reported.** The stream-json
+  `usage` object carries four buckets (`input_tokens`,
+  `cache_creation_input_tokens`, `cache_read_input_tokens`,
+  `output_tokens`); the parser only summed input+output, which for
+  Claude Code 2.x is just the "new-input delta" and ignores the ~10k–
+  200k cache-read tokens per call. That made Claude look like a
+  lightweight (~120k total) vs Codex (~3M) when in reality Claude is
+  the heavyweight per PRD §5 (runs 3 of the 4 main phases). The
+  comparison was apples-to-oranges: Codex's `tokens used: N` already
+  aggregates all buckets. Parser now sums all four for Claude so
+  numbers are comparable.
+- **Long goals were silently truncated in the Track display.** The
+  first-line-only `.slice(0, 60)` meant a real two-sentence goal just
+  ended with `…`. Now the full goal wraps in the display area (height
+  capped + scrollable) and the element has a `title` tooltip showing
+  everything on hover.
+
+---
+
 ## v1.3.0 · 2026-04-18
 
 Fixes a class of silent bugs where Codex could run for 100+ rounds

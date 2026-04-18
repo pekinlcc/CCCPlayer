@@ -57,8 +57,16 @@ pub enum StreamEvent {
 ///    `{"type":"usage","input_tokens":N,"output_tokens":M}`
 /// 2. Nested (real Claude Code `--output-format stream-json --verbose`):
 ///    `{"type":"assistant","message":{…,"usage":{"input_tokens":N,
-///     "output_tokens":M,"cache_creation_input_tokens":…,
-///     "cache_read_input_tokens":…}}}`
+///     "output_tokens":M,"cache_creation_input_tokens":A,
+///     "cache_read_input_tokens":B}}}`
+///
+/// Returns `(input_total, output_total)` where `input_total` is the SUM
+/// of `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`
+/// for the nested form. Omitting cache buckets under-reports Claude by
+/// ~25× on long sessions (cache-read is typically 10k–200k per call
+/// while `input_tokens` is just the new delta); this broke apples-to-
+/// apples comparison with Codex whose `tokens used` already aggregates
+/// cache. See decision #76 in PRD.
 ///
 /// Each `assistant` message represents one API call; callers should sum
 /// deltas across the turn. `result` messages (session totals) are
@@ -71,11 +79,11 @@ pub fn parse_usage_line(line: &str) -> Option<(u64, u64)> {
         "assistant" => v.get("message")?.get("usage")?,
         _ => return None,
     };
-    let i = usage.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-    let o = usage
-        .get("output_tokens")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0);
+    let get = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let i = get("input_tokens")
+        .saturating_add(get("cache_creation_input_tokens"))
+        .saturating_add(get("cache_read_input_tokens"));
+    let o = get("output_tokens");
     if i == 0 && o == 0 {
         return None;
     }
@@ -544,9 +552,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_nested_assistant_usage() {
+    fn parses_nested_assistant_usage_sums_cache_buckets() {
+        // v1.3.1: input_total = input + cache_creation + cache_read so
+        // Claude's real token usage is comparable to Codex's aggregate.
         let line = r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-opus","content":[],"usage":{"input_tokens":5,"cache_creation_input_tokens":8533,"cache_read_input_tokens":11718,"output_tokens":77}}}"#;
-        assert_eq!(parse_usage_line(line), Some((5, 77)));
+        assert_eq!(parse_usage_line(line), Some((5 + 8533 + 11718, 77)));
+    }
+
+    #[test]
+    fn parses_nested_assistant_usage_without_cache_buckets() {
+        // Fake CLIs and synthetic inputs may omit the cache fields;
+        // must still parse cleanly.
+        let line = r#"{"type":"assistant","message":{"usage":{"input_tokens":12,"output_tokens":34}}}"#;
+        assert_eq!(parse_usage_line(line), Some((12, 34)));
     }
 
     #[test]

@@ -18,6 +18,14 @@
 
 ## English
 
+### What's new in v1.3.1 (2026-04-18)
+
+- **Claude token count was ~25× under-reported** (stream-json parser
+  was ignoring `cache_read_input_tokens`). Claude is actually the
+  heavyweight per the PRD; display now reflects it correctly.
+- **Long goals now wrap in the Track line** instead of being silently
+  chopped at 60 chars. Hover shows the full goal.
+
 ### What's new in v1.3 (2026-04-18)
 
 - **Agents can now disagree.** Prompts rewritten: Claude can reject a
@@ -103,8 +111,8 @@ Latest Apple Silicon build lives in [`dist/`](dist/):
 
 | File | Size | Use |
 | --- | --- | --- |
-| [`CCCPlayer-1.3.0-arm64.dmg`](dist/CCCPlayer-1.3.0-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
-| [`CCCPlayer-1.3.0-arm64.app.tar.gz`](dist/CCCPlayer-1.3.0-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
+| [`CCCPlayer-1.3.1-arm64.dmg`](dist/CCCPlayer-1.3.1-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
+| [`CCCPlayer-1.3.1-arm64.app.tar.gz`](dist/CCCPlayer-1.3.1-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
 
 Apple Silicon only for now (M1/M2/M3/M4). Intel builds can be produced from
 source (see *Build from source* below).
@@ -241,6 +249,15 @@ This is a personal project — open a PR or file an Issue on GitHub.
 
 ## 中文说明
 
+### v1.3.1 新增（2026-04-18）
+
+- **Claude token 统计被低估约 25 倍**（stream-json parser 之前只加
+  `input_tokens + output_tokens`，忘了加 `cache_read_input_tokens`——这个
+  才是大头，每次调用 10k-200k）。导致 Claude 显示 120k vs Codex 3M
+  看起来像 Codex 是主力其实反了。Parser 修正后 Claude 显示的是真实累计。
+- **Track 长目标不再被砍**。之前在 Track 那行 `.slice(0, 60)` 截断，
+  现在让它折行 + 限高滚动，hover 显示完整目标。
+
 ### v1.3 新增（2026-04-18）
 
 - **两个 agent 现在可以真正意义上分歧**。prompt 全面重写：Claude 可以
@@ -316,8 +333,8 @@ codex login
 
 | 文件 | 大小 | 用途 |
 | --- | --- | --- |
-| [`CCCPlayer-1.3.0-arm64.dmg`](dist/CCCPlayer-1.3.0-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
-| [`CCCPlayer-1.3.0-arm64.app.tar.gz`](dist/CCCPlayer-1.3.0-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
+| [`CCCPlayer-1.3.1-arm64.dmg`](dist/CCCPlayer-1.3.1-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
+| [`CCCPlayer-1.3.1-arm64.app.tar.gz`](dist/CCCPlayer-1.3.1-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
 
 目前只有 Apple Silicon（M1/M2/M3/M4）版本。Intel 可以自己编（见下方「从源码编译」）。
 
