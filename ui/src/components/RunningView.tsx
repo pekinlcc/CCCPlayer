@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { pauseSession, stopSession, subscribeEvents, subscribeRawLog } from '../api'
+import {
+  pauseSession,
+  startSession,
+  stopSession,
+  subscribeEvents,
+  subscribeRawLog,
+} from '../api'
 import type { Event, GoalCheckSnapshot, Phase, RawLogLine, SessionState } from '../types'
 import { Meter, PauseIcon, PlayIcon, Shell, StopIcon } from './Shell'
 import type { ShellStatus } from './Shell'
@@ -149,6 +155,15 @@ export function RunningView(props: {
     }
   }, [rawLog])
 
+  // Clear the optimistic pause/stop indicator when the reducer confirms the
+  // real state transition. `pausing`/`stopping` are "I asked for this but
+  // haven't seen it yet"; once we do, drop them so the shell stops showing
+  // the `…` suffix.
+  useEffect(() => {
+    if (sessionState === 'PAUSED') setPausing(false)
+    if (sessionState === 'ABANDONED') setStopping(false)
+  }, [sessionState])
+
   const sinceLastActivity = useMemo(() => {
     void nowTick
     return Math.max(0, Math.floor((Date.now() - lastActivityAt) / 1000))
@@ -160,19 +175,32 @@ export function RunningView(props: {
 
   // Map reducer-reported SessionState to the shell's status badge. Done /
   // Abandoned / Errored route away via props.onDone, so the only values we
-  // really render here are CREATED / RUNNING / PAUSED.
+  // really render here are CREATED / RUNNING / PAUSED. While we wait for
+  // the reducer to actually apply a user-requested pause/stop (can take a
+  // few seconds — the orchestrator has to signal SIGINT to the child and
+  // let the current turn unwind), show an optimistic PAUSING / STOPPING
+  // state so the button click feels responsive. `pausing`/`stopping` reset
+  // once we see the real state transition via state_changed events.
+  const isPausing = pausing && sessionState !== 'PAUSED'
+  const isStopping = stopping && sessionState !== 'ABANDONED'
   const shellStatus: ShellStatus =
-    sessionState === 'PAUSED' ? 'paused'
+    isStopping ? 'stopped'
+    : isPausing ? 'paused'
+    : sessionState === 'PAUSED' ? 'paused'
     : sessionState === 'ERRORED' ? 'errored'
     : sessionState === 'DONE' ? 'done'
     : sessionState === 'ABANDONED' ? 'stopped'
     : 'running'
   const shellLabel =
-    sessionState === 'PAUSED' ? 'Paused'
+    isStopping ? 'Stopping…'
+    : isPausing ? 'Pausing…'
+    : sessionState === 'PAUSED' ? 'Paused'
     : sessionState === 'ERRORED' ? 'Errored'
     : sessionState === 'DONE' ? 'Done'
     : sessionState === 'ABANDONED' ? 'Stopped'
     : 'Running'
+
+  const canResume = sessionState === 'PAUSED' && !isPausing
 
   return (
     <Shell status={shellStatus} statusLabel={shellLabel}>
@@ -204,7 +232,19 @@ export function RunningView(props: {
       </div>
 
       <div className="transport">
-        <button type="button" className="tbtn play big" disabled title="Running">
+        <button
+          type="button"
+          className="tbtn play big"
+          title={canResume ? 'Resume' : 'Running'}
+          disabled={!canResume}
+          onClick={async () => {
+            if (!canResume) return
+            // Resuming is just a fresh Start — AppState.start is
+            // idempotent and reuses the session dir, so the reducer picks
+            // up at the recorded state/phase.
+            await startSession(props.goal, props.workdir)
+          }}
+        >
           <PlayIcon />
         </button>
         <button
@@ -212,10 +252,20 @@ export function RunningView(props: {
           className="tbtn"
           title="Pause"
           onClick={async () => {
+            if (isPausing || sessionState === 'PAUSED') return
             setPausing(true)
-            try { await pauseSession() } finally { setPausing(false) }
+            // Intentionally don't reset `pausing` here on IPC ack — it
+            // stays true until we see state_changed → PAUSED land in the
+            // timeline (see useEffect above). Otherwise the UI "blinks"
+            // out of Pausing… back to Running while the orchestrator is
+            // still unwinding the current turn.
+            try {
+              await pauseSession()
+            } catch {
+              setPausing(false)
+            }
           }}
-          disabled={pausing}
+          disabled={isPausing || sessionState === 'PAUSED'}
         >
           <PauseIcon />
         </button>
@@ -224,15 +274,15 @@ export function RunningView(props: {
           className="tbtn stop"
           title="Stop"
           onClick={async () => {
+            if (isStopping) return
             setStopping(true)
             try {
               await stopSession()
-              props.onDone('ABANDONED')
-            } finally {
+            } catch {
               setStopping(false)
             }
           }}
-          disabled={stopping}
+          disabled={isStopping}
         >
           <StopIcon />
         </button>

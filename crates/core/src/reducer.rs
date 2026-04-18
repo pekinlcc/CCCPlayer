@@ -254,9 +254,19 @@ impl Reducer {
                         blocking_count,
                     },
                 )));
+                // v1.2+: Run GOAL_CHECK after *every* REVIEWING, regardless
+                // of verdict. This gives the user a fresh "distance to goal"
+                // signal every cycle (2-10 min) instead of only when Codex
+                // happens to approve (which can take many rounds of
+                // changes_requested or never happen). The GOAL_CHECK
+                // outcome branch (below) still decides DONE vs REFINING:
+                //   - both agents done=true → DONE
+                //   - either says not-done → REFINING (next round)
+                // Blocked verdict stays the legacy Refining path since it
+                // signals the review setup itself is malformed; no point
+                // asking "are we done?" at that point.
                 match verdict {
-                    Verdict::Approved => {
-                        // Run Goal-Check on both agents (parallel).
+                    Verdict::Approved | Verdict::ChangesRequested => {
                         self.gc_claude = None;
                         self.gc_codex = None;
                         self.transition(&mut effects, SessionState::Running, Phase::GoalCheck);
@@ -269,7 +279,7 @@ impl Reducer {
                             phase: Phase::GoalCheck,
                         });
                     }
-                    Verdict::ChangesRequested | Verdict::Blocked => {
+                    Verdict::Blocked => {
                         self.meta.round += 1;
                         self.transition(
                             &mut effects,
@@ -416,6 +426,43 @@ mod tests {
         });
         assert!(matches!(r.meta().state, SessionState::Done));
         assert!(eff.iter().any(|e| matches!(e, Effect::NotifyDone)));
+    }
+
+    #[test]
+    fn changes_requested_also_fires_goal_check_on_both() {
+        // v1.2+: GOAL_CHECK now runs after every REVIEWING outcome (not
+        // just Approved) so the user sees a fresh "distance to goal"
+        // signal each cycle.
+        let mut r = mk();
+        r.handle(StateCommand::Start {
+            goal_check_done: None,
+        });
+        r.handle(StateCommand::TurnFinished {
+            agent: Agent::Claude,
+            phase: Phase::Planning,
+            outcome: TurnOutcome::Ok,
+        });
+        r.handle(StateCommand::TurnFinished {
+            agent: Agent::Claude,
+            phase: Phase::Implementing,
+            outcome: TurnOutcome::Ok,
+        });
+        let eff = r.handle(StateCommand::ReviewParsed {
+            version: 1,
+            verdict: Verdict::ChangesRequested,
+            blocking_count: 2,
+        });
+        let launches: Vec<_> = eff
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LaunchTurn { agent, phase } => Some((*agent, *phase)),
+                _ => None,
+            })
+            .collect();
+        assert!(launches.contains(&(Agent::Claude, Phase::GoalCheck)));
+        assert!(launches.contains(&(Agent::Codex, Phase::GoalCheck)));
+        // Should NOT have jumped straight to Refining.
+        assert!(!launches.contains(&(Agent::Claude, Phase::Refining)));
     }
 
     #[test]

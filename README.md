@@ -18,25 +18,29 @@
 
 ## English
 
-### What's new in v1.1 (2026-04-18)
+### What's new in v1.2 (2026-04-18)
 
-- **Remaining-to-goal panel**: Progress now shows what Claude and Codex each
-  think is still missing, side by side, with an agreement badge
-  (`both agree · goal met` / `both say not done` / `1 agent done · 1
-  disagrees` / `waiting for first goal check`). Since the state machine
-  transitions to `DONE` only when both independently report `done=true`,
-  this surface is exactly the completion contract.
-- **Per-agent token labels**: the Tokens KV splits into `Claude N` + `Codex N`
-  rows so you can see where the budget is going.
-- **Native folder picker**: FOLDER row gains a `Browse…` button (macOS
-  dialog) via `tauri-plugin-dialog`.
-- **Fixed**: title-bar status was stuck at `▶ RUNNING` even after the session
-  errored, because the UI regex didn't accept the reducer's CamelCase
-  `state_changed` payload. Pause/Stop buttons looked broken but were
-  actually fine — there was just no live turn left to cancel. Regex is
-  case-insensitive now and status follows the reducer truthfully.
-- **Event schema** (internal): `GoalCheck` events now carry the full
-  `missing[]` list + `rationale`. Older logs still parse.
+- **GOAL_CHECK now runs after every REVIEWING.** The Remaining-to-goal
+  panel no longer stays stuck at "waiting for first goal check" for
+  hundreds of rounds. Every review cycle launches both agents' goal
+  checks in parallel and pushes fresh missing lists + rationale into
+  the panel. DONE still gates on both independently saying `done=true`.
+- **Resume button.** Once paused, the triangle Play button lights up as
+  Resume so you can continue without losing session state.
+- **Optimistic Pause / Stop feedback.** The title bar now shows
+  `⏸ PAUSING…` / `■ STOPPING…` the instant you click, instead of
+  pretending nothing happened for the 5–10s it takes the orchestrator
+  to actually unwind the current turn.
+
+### v1.1 recap
+
+- Remaining-to-goal panel with dual-column (Claude / Codex) + agreement
+  badge showing the DONE contract (both agents done=true).
+- Per-agent labeled Tokens KV (`Claude N` / `Codex N`).
+- Native `Browse…` folder picker.
+- Fixed: title-bar status / phase display was frozen at initial value
+  due to a CamelCase regex mismatch; Pause looked broken as a result.
+- Event schema: `GoalCheck` carries full `missing[]` + `rationale`.
 
 Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 
@@ -77,8 +81,8 @@ Latest Apple Silicon build lives in [`dist/`](dist/):
 
 | File | Size | Use |
 | --- | --- | --- |
-| [`CCCPlayer-1.1.0-arm64.dmg`](dist/CCCPlayer-1.1.0-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
-| [`CCCPlayer-1.1.0-arm64.app.tar.gz`](dist/CCCPlayer-1.1.0-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
+| [`CCCPlayer-1.2.0-arm64.dmg`](dist/CCCPlayer-1.2.0-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
+| [`CCCPlayer-1.2.0-arm64.app.tar.gz`](dist/CCCPlayer-1.2.0-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
 
 Apple Silicon only for now (M1/M2/M3/M4). Intel builds can be produced from
 source (see *Build from source* below).
@@ -215,24 +219,26 @@ This is a personal project — open a PR or file an Issue on GitHub.
 
 ## 中文说明
 
-### v1.1 新增（2026-04-18）
+### v1.2 新增（2026-04-18）
 
-- **「距离目标还有多远」面板**：Progress 里新增模块，左右并排显示 Claude
-  和 Codex 各自最新的 GOAL_CHECK 结果（missing 列表 + rationale + 轮次 +
-  时间），顶部一个 agreement 徽章告诉你「双方是否一致」（`both agree · goal
-  met` / `both say not done` / `1 agent done · 1 disagrees` / `waiting for
-  first goal check`）。状态机本来就要求两边都 `done=true` 才进 DONE——这个
-  面板把这个契约可视化。
-- **Token 按 agent 分开标注**：原来 `120,360 + 3,021,158` 看不出谁是谁，现在
-  拆成 `Claude 120,360` + `Codex 3,021,158`，label 按 agent 颜色区分。
-- **本地目录选择器**：FOLDER 输入框右侧加 `Browse…` 按钮，走 macOS 原生目录
-  选择对话框（新依赖 `tauri-plugin-dialog`）。
-- **修复**：之前 session 明明已经 Errored，标题栏却一直显示 `▶ RUNNING`；点
-  Pause 看起来不生效——其实是 UI 的 state_changed 正则只认全大写，错过了
-  reducer 发出的 CamelCase（`Running/Implementing`、`Errored/Refining`）。
-  状态一直没刷进 UI。已修。
-- **事件 schema**（内部）：`GoalCheck` 事件现在带全量 `missing[]` + `rationale`。
-  旧日志用 serde default 仍兼容。
+- **每次 REVIEWING 完都跑 GOAL_CHECK**（之前要 Codex Approved 才跑，导致
+  实测时 167 轮还一直「waiting for first goal check」）。现在每个 review
+  cycle 尾部并行跑两个 agent 的 goal-check，Remaining 面板 2-10 分钟刷一次
+  新鲜的「还差什么」。DONE 的判定不变——仍然是双方都 `done=true`。
+- **Resume 按钮**。session 进 PAUSED 后，播放器的三角 Play 按钮重新亮起
+  变 Resume，点击就从当前状态继续跑，不会丢 session。
+- **Pause / Stop 点下去立刻有反馈**——标题栏瞬间切到 `⏸ PAUSING…` /
+  `■ STOPPING…`，不再出现"点完 5-10 秒啥都不动"的错觉。
+
+### v1.1 回顾
+
+- Remaining-to-goal 面板双栏（Claude / Codex）+ agreement 徽章，把「DONE
+  需要双方一致」的契约可视化。
+- Tokens 按 agent 分行标注（`Claude N` / `Codex N`）。
+- 原生 `Browse…` 目录选择器。
+- 修复：state_changed CamelCase 正则 bug 导致 UI 状态永远不刷，Pause 看起来
+  没反应其实是 session 早已 Errored。
+- 事件 schema：`GoalCheck` 带全量 `missing[]` + `rationale`。
 
 完整变更见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
 
@@ -270,8 +276,8 @@ codex login
 
 | 文件 | 大小 | 用途 |
 | --- | --- | --- |
-| [`CCCPlayer-1.1.0-arm64.dmg`](dist/CCCPlayer-1.1.0-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
-| [`CCCPlayer-1.1.0-arm64.app.tar.gz`](dist/CCCPlayer-1.1.0-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
+| [`CCCPlayer-1.2.0-arm64.dmg`](dist/CCCPlayer-1.2.0-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
+| [`CCCPlayer-1.2.0-arm64.app.tar.gz`](dist/CCCPlayer-1.2.0-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
 
 目前只有 Apple Silicon（M1/M2/M3/M4）版本。Intel 可以自己编（见下方「从源码编译」）。
 

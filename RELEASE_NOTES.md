@@ -1,5 +1,58 @@
 # CCCPlayer Release Notes
 
+## v1.2.0 · 2026-04-18
+
+Makes the "distance to goal" panel actually update per cycle, fixes the
+pause/stop UX so clicks feel responsive, and adds a Resume button so a
+paused session can be continued without losing state.
+
+### Changed
+
+- **GOAL_CHECK now runs after every REVIEWING**, regardless of verdict.
+  Previously the state machine only entered `GoalCheck` phase when Codex
+  returned `Approved` — which in practice could never happen for dozens
+  of rounds (Codex kept finding one blocking item, loop stayed in
+  `REVIEWING ↔ REFINING`). The Remaining-to-goal panel kept showing
+  "waiting for first goal check" all the way to round 167+ in real user
+  testing. Now every `REVIEWING → (verdict)` cycle launches GOAL_CHECK on
+  both agents in parallel, so the panel refreshes every 2–10 minutes.
+  DONE still gates on both agents independently reporting `done=true`.
+
+  Trade-off: +2 CLI invocations per round (one Claude goal-check, one
+  Codex goal-check), each short. Worth it for the continuous signal.
+
+  `Blocked` verdict still skips straight to Refining (unchanged) — if
+  the review machinery itself is malformed, asking "are we done?" at
+  that point is pointless.
+
+### Added
+
+- **Resume button.** Once a session enters `PAUSED`, the big triangle
+  Play button in the transport lights up again as Resume; clicking it
+  calls `startSession(goal, workdir)` (idempotent on the AppState side)
+  so the orchestrator picks up from the recorded state/phase. Before
+  this, pause was effectively a one-way gate into Stop territory.
+- **Optimistic transport feedback.** Clicking Pause or Stop now
+  immediately shows `⏸ PAUSING…` / `■ STOPPING…` in the title-bar badge
+  and disables the button, instead of waiting 5–10 seconds for the
+  orchestrator to actually unwind the current turn. The label clears
+  itself once the reducer confirms the real `state_changed` event.
+
+### Fixed
+
+- Pause and Stop appeared to "do nothing" because the orchestrator
+  needs up to 5s (SIGINT grace) + next step-loop iteration to actually
+  transition state, and the UI gave no in-between signal. This is now
+  fixed by the optimistic feedback above.
+
+### Known limitations
+
+- Rate-limit / quota-exhaustion auto-pause still not implemented. When
+  a CLI's 5-hour quota runs out you still see a crash loop until the
+  flapping limit triggers ERRORED. Planned for v1.3.
+
+---
+
 ## v1.1.0 · 2026-04-18
 
 Focused on runtime correctness, making "how close are we to done?" legible

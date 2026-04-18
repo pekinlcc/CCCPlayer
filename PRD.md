@@ -117,12 +117,21 @@ CCCPlayer 必须优雅处理工作目录的所有合理起始状态。**不假�
 - `ERRORED`：harness 连续失败达阈值时进入，等待用户介入。
 - `ABANDONED`：用户显式"停止并放弃"后的终态。
 
-**GOAL-CHECK 触发点**（明确，避免歧义）：
+**GOAL-CHECK 触发点**（v1.2+ 更新，见决策 #67）：
 1. 用户点"开始"且 Session 不在 RUNNING 类状态时，**串行**跑一次（先 Claude Code，
    再 Codex；任一返回 done=false 就立刻按其结论进入下一态，不浪费另一次调用）。
-2. 每个 REVIEWING turn 完成后，若 Codex verdict == `approved`，**并行**跑两个
-   GOAL-CHECK；两个都 done=true 才进 DONE，否则按 §7 的分歧规则继续。
-3. 其他时刻不跑 GOAL-CHECK（避免无谓调用）。
+2. **每个 REVIEWING turn 完成后都跑**——无论 verdict 是 `approved` 还是
+   `changes_requested`，都并行触发两个 GOAL-CHECK。两个都 `done=true` 才进 DONE，
+   否则继续 REFINING。这保证 Remaining-to-goal 面板每轮 review cycle
+   都能看到新鲜数据，而不是干等 Codex 偶尔 approve。
+3. 例外：Codex verdict == `blocked`（review 本身坏的退路）不跑 GOAL-CHECK，
+   直接回 REFINING。
+4. 其他时刻不跑 GOAL-CHECK。
+
+**代价与权衡**：每个 review cycle 额外 +2 CLI 调用（Claude 和 Codex 各一次
+goal-check，并行）。每次 goal-check 只读文件树并产结构化 JSON，比完整 turn
+快很多；实测 10-60 秒量级。换来用户能每 2-10 分钟看到「还差什么」的实时
+信号，而不是跑几小时都不知道进度。
 
 ## 6. UI / 交互设计
 
@@ -1169,6 +1178,9 @@ next_state rules:
 | 64 | Remaining-to-goal 双栏 + agreement badge（v1.1） | Progress 面板新增模块，左右各自渲染 Claude / Codex 最新 GOAL_CHECK 的 missing 列表与 rationale，顶部徽章聚合 both-done / both-not-done / split / waiting 四态，与状态机「两方都 done=true 才进 DONE」契约一致。刻意不做 item 级模糊匹配（fuzzy 字符串合并为"共识"过度承诺），以两份独立列表并排最诚实。 | §6.6 |
 | 65 | Tokens 按 agent 分行标签化（v1.1） | 原先 `N + M` 单行难分归属；改双行 `Claude N` / `Codex N`，label 按 agent 上色（cyan / magenta）、数字 lime 保留强调。 | §6 视觉设计语言 |
 | 66 | 原生目录选择器（v1.1） | 新增 `tauri-plugin-dialog` 依赖 + `dialog:allow-open` capability。Welcome 的 FOLDER 行加 `Browse…` 按钮，`pickFolder()` 包装 `@tauri-apps/plugin-dialog` 的 `open({directory:true})`，回传路径触发现有 classify 流程。 | §6.2 |
+| 67 | GOAL_CHECK 每轮触发（v1.2） | 原：只在 Codex `Approved` 后进 GoalCheck；实测 Codex 连续 changes_requested 100+ 轮，UI Remaining 一直 "waiting for first goal check"。改：`ReviewParsed` 的 `Approved \| ChangesRequested` 都触发 `GoalCheck`，保留 `Blocked` 走 Refining（review 本身坏的退路）。代价：每轮 +2 CLI（两个 agent 并行），换每 2-10 分钟一次的「距离目标」刷新。DONE 判据不变（两 agent 都 `done=true`）。 | §5、§6.6 |
+| 68 | Resume 按钮（v1.2） | PAUSED 后 Running view 的 Play 按钮重新亮起为 Resume，点击调 `startSession(goal, workdir)`。`AppState::start` 幂等——既有 session 目录被复用，Orchestrator 重建后 reducer 从磁盘 load 回到 PAUSED 前状态继续。 | §6.4 |
+| 69 | 乐观 Pause/Stop 反馈（v1.2） | 点击 Pause/Stop 后，`pausing`/`stopping` 本地状态立刻翻 true，标题栏显示 `PAUSING…` / `STOPPING…`，直到 `state_changed` 事件带回真实 `PAUSED`/`ABANDONED` 再翻回 false。之前 UI 完全无反馈，orchestrator 要 5-10s 才 SIGINT 子进程完成 turn 再 pause，用户以为按钮坏了。 | §6.1 |
 
 ---
 
