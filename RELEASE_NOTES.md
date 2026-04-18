@@ -1,5 +1,39 @@
 # CCCPlayer Release Notes
 
+## v1.3.2 · 2026-04-18
+
+Distribution hardening (free tier — no paid Apple Developer account).
+
+### Added
+
+- **Ad-hoc code signing** on every build (`codesign --deep --force
+  --sign -`). Does NOT make Gatekeeper trust the app (that requires a
+  paid Developer ID + notarization), but it gives the binary a valid
+  internal signature so `open` stops logging "broken signature"
+  warnings and macOS doesn't re-classify the bundle on every launch.
+- **One-click installer bundle** `dist/CCCPlayer-<ver>-arm64-install.zip`
+  containing:
+    - `CCCPlayer.app` (ad-hoc signed)
+    - `install.command` — double-click script that clears the
+      `com.apple.quarantine` xattr, copies the app to `/Applications`,
+      and launches it. User still has to right-click → Open the first
+      time to clear Gatekeeper's warning on the script itself, but
+      that's one confirmation vs. typing `xattr` by hand.
+    - `README.txt` with three alternate install paths (`install.command`
+      / right-click Open / Terminal xattr).
+- README now documents the three install options clearly in both EN
+  and ZH sections.
+
+### Not done (intentional)
+
+- **No notarization.** Requires an Apple Developer Program membership
+  ($99/year). If you set one up: swap `--sign -` in `build-macos.sh`
+  for `"Developer ID Application: <Your Name>"` and add
+  `xcrun notarytool submit ... --wait && xcrun stapler staple` after
+  the dmg is produced.
+
+---
+
 ## v1.3.1 · 2026-04-18
 
 Small but visible fixes.

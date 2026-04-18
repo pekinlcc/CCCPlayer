@@ -109,22 +109,33 @@ harness, not a proxy.
 
 Latest Apple Silicon build lives in [`dist/`](dist/):
 
-| File | Size | Use |
+| File | Size | How to install |
 | --- | --- | --- |
-| [`CCCPlayer-1.3.1-arm64.dmg`](dist/CCCPlayer-1.3.1-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
-| [`CCCPlayer-1.3.1-arm64.app.tar.gz`](dist/CCCPlayer-1.3.1-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
+| [`CCCPlayer-<ver>-arm64-install.zip`](dist/) | ~4.5 MB | **Easiest.** Unzip, double-click `install.command`. First run: right-click → Open to clear the Gatekeeper script warning. |
+| [`CCCPlayer-<ver>-arm64.dmg`](dist/) | ~5.7 MB | Traditional macOS install: mount, drag into `/Applications`. Then see "unblock" below. |
+| [`CCCPlayer-<ver>-arm64.app.tar.gz`](dist/) | ~4.5 MB | Just the `.app` — for developers / CI. |
 
 Apple Silicon only for now (M1/M2/M3/M4). Intel builds can be produced from
 source (see *Build from source* below).
 
-The `.app` is unsigned and unnotarized. On first launch macOS Gatekeeper will
-block it; unblock with either:
+### Unsigned build — why and how to unblock
 
-```sh
-# A. Right-click the .app → Open → confirm once.
-# B. Strip quarantine in Terminal:
-xattr -d com.apple.quarantine /Applications/CCCPlayer.app
-```
+The build is ad-hoc signed but **not notarized** — there is no paid Apple
+Developer Program account behind the release. On a fresh Mac, Gatekeeper
+will refuse the first launch with "CCCPlayer cannot be opened because the
+developer cannot be verified". Three ways to get past it:
+
+1. **`-install.zip` + `install.command`** (recommended).
+   The installer script clears the quarantine flag and copies the app to
+   `/Applications`. The script itself may also trip Gatekeeper the first
+   time — right-click it → Open → confirm once.
+2. **Right-click → Open** on `CCCPlayer.app` directly, confirm in the
+   dialog. Subsequent launches work normally.
+3. **Strip quarantine in Terminal** (power user):
+   ```sh
+   xattr -cr /Applications/CCCPlayer.app
+   open /Applications/CCCPlayer.app
+   ```
 
 ### How to use
 
@@ -331,20 +342,29 @@ codex login
 
 最新 Apple Silicon 构建产物在 [`dist/`](dist/)：
 
-| 文件 | 大小 | 用途 |
+| 文件 | 大小 | 安装方式 |
 | --- | --- | --- |
-| [`CCCPlayer-1.3.1-arm64.dmg`](dist/CCCPlayer-1.3.1-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
-| [`CCCPlayer-1.3.1-arm64.app.tar.gz`](dist/CCCPlayer-1.3.1-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
+| [`CCCPlayer-<ver>-arm64-install.zip`](dist/) | ~4.5 MB | **推荐**。解压后双击 `install.command`，第一次右键→打开一次确认，脚本自动去掉 quarantine + 复制到 `/Applications` + 启动 |
+| [`CCCPlayer-<ver>-arm64.dmg`](dist/) | ~5.7 MB | 传统 macOS 装法：挂载 DMG → 拖进 `/Applications`。之后按下方"解除 Gatekeeper"操作 |
+| [`CCCPlayer-<ver>-arm64.app.tar.gz`](dist/) | ~4.5 MB | 纯 `.app` —— 给开发者 / CI 用 |
 
 目前只有 Apple Silicon（M1/M2/M3/M4）版本。Intel 可以自己编（见下方「从源码编译」）。
 
-未签名未公证，首次打开会被 Gatekeeper 拦，二选一解除：
+### 未签名的说明 · 三种解除 Gatekeeper 的方法
 
-```sh
-# A. 右键 .app → 打开 → 再点一次"打开"
-# B. 终端放行：
-xattr -d com.apple.quarantine /Applications/CCCPlayer.app
-```
+本次构建做了 **ad-hoc 签名** 但**没有公证**——因为没买 Apple Developer
+Program（$99/年）。别人首次下载打开会被 macOS 拦「无法打开，因为无法验证
+开发者」。三选一解除：
+
+1. **用 `-install.zip` + `install.command`**（最省事）。
+   脚本自动清 quarantine + 拷到 `/Applications` + 启动。脚本本身首次也会
+   被 Gatekeeper 拦，**右键脚本 → 打开 → 确认**即可，仅一次。
+2. **右键 CCCPlayer.app → 打开**，对话框里再点一次"打开"。后续双击正常。
+3. **终端放行**（懂命令行的）：
+   ```sh
+   xattr -cr /Applications/CCCPlayer.app
+   open /Applications/CCCPlayer.app
+   ```
 
 ### 怎么用
 

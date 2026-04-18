@@ -108,14 +108,86 @@ case "$ARCH" in
     x86_64)    BUNDLE_DIR="$BUNDLE_DIR/x86_64-apple-darwin/release/bundle" ;;
 esac
 
+APP_PATH="$BUNDLE_DIR/macos/CCCPlayer.app"
+DMG_PATH=$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name 'CCCPlayer*.dmg' 2>/dev/null | head -1 || true)
+
+# --- Ad-hoc code signature ---------------------------------------------------
+#
+# We don't have a paid Apple Developer ID, so we can't produce a notarized
+# build that passes Gatekeeper on other Macs cleanly. What we CAN do is
+# ad-hoc sign the bundle with `codesign -s -`. This has two effects:
+#   - The binary has a valid signature recorded in its header, which some
+#     tools and future macOS versions are strict about (otherwise `open`
+#     may log "broken signature" warnings).
+#   - Consistent identity across rebuilds so the hardened-runtime plumbing
+#     inside macOS doesn't mis-classify the app each launch.
+#
+# Gatekeeper's "cannot be opened because the developer cannot be verified"
+# warning is NOT defeated by ad-hoc signing — the installer script shipped
+# below clears the quarantine xattr instead.
+if [[ -d "$APP_PATH" ]]; then
+    echo "Ad-hoc codesigning $APP_PATH ..."
+    codesign --force --deep --sign - "$APP_PATH"
+    codesign --verify --verbose=2 "$APP_PATH" >/dev/null 2>&1 \
+        && echo "  → signature valid (ad-hoc)" \
+        || echo "  → warning: ad-hoc signature did not verify"
+fi
+
+# --- Bundle install zip ------------------------------------------------------
+#
+# Produce dist/CCCPlayer-<version>-<arch>-install.zip containing:
+#   - CCCPlayer.app (ad-hoc signed)
+#   - install.command (double-click script: xattr clear + cp to /Applications
+#     + launch)
+#   - README.txt (brief install instructions for humans)
+#
+# End-user flow: download zip → double-click → macOS extracts → double-click
+# install.command (right-click → Open the first time to clear Gatekeeper
+# warning on the script itself).
+VERSION=$(grep -E '^version = "' "$ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+DIST_DIR="$ROOT/dist"
+mkdir -p "$DIST_DIR"
+STAGING="$ROOT/target/installer-staging"
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+
+if [[ -d "$APP_PATH" ]]; then
+    cp -R "$APP_PATH" "$STAGING/"
+    cp "$ROOT/scripts/install.command" "$STAGING/install.command"
+    chmod +x "$STAGING/install.command"
+    cp "$ROOT/scripts/installer-README.txt" "$STAGING/README.txt" 2>/dev/null \
+        || echo "(no README.txt template found; zip will ship without it)"
+
+    case "$ARCH" in
+        universal) ZIP_NAME="CCCPlayer-${VERSION}-universal-install.zip" ;;
+        arm64)     ZIP_NAME="CCCPlayer-${VERSION}-arm64-install.zip" ;;
+        x86_64)    ZIP_NAME="CCCPlayer-${VERSION}-x86_64-install.zip" ;;
+    esac
+    (cd "$STAGING" && zip -qry "$DIST_DIR/$ZIP_NAME" .)
+    echo "Packaged installer: $DIST_DIR/$ZIP_NAME"
+
+    # Also drop the plain .app tarball and the .dmg into dist/ if present
+    # (so README download links stay stable).
+    TAR_NAME="CCCPlayer-${VERSION}-${ARCH//universal/universal}-install.app.tar.gz"
+    case "$ARCH" in
+        universal) TAR_NAME="CCCPlayer-${VERSION}-universal.app.tar.gz" ;;
+        arm64)     TAR_NAME="CCCPlayer-${VERSION}-arm64.app.tar.gz" ;;
+        x86_64)    TAR_NAME="CCCPlayer-${VERSION}-x86_64.app.tar.gz" ;;
+    esac
+    (cd "$BUNDLE_DIR/macos" && tar -czf "$DIST_DIR/$TAR_NAME" CCCPlayer.app)
+    if [[ -n "$DMG_PATH" ]]; then
+        cp "$DMG_PATH" "$DIST_DIR/CCCPlayer-${VERSION}-${ARCH}.dmg" 2>/dev/null || true
+    fi
+fi
+
 echo
 echo "------------------------------------------------------------"
 echo "Build complete. Artifacts:"
 find "$BUNDLE_DIR" -maxdepth 3 -name 'CCCPlayer*.app' -o -name 'CCCPlayer*.dmg' 2>/dev/null | sed 's/^/  /'
+find "$DIST_DIR" -maxdepth 1 -name "CCCPlayer-${VERSION}-*" 2>/dev/null | sed 's/^/  /'
 echo
-echo "Next steps:"
-echo "  - Launch:         open '$BUNDLE_DIR/macos/CCCPlayer.app'"
-echo "  - Code sign:      codesign --deep --force --sign \"Developer ID Application: YOUR NAME\" <path>.app"
-echo "  - Notarize:       xcrun notarytool submit <path>.dmg --keychain-profile \"notary\" --wait"
-echo "  - First run:      right-click → Open, or 'spctl --add' to bypass Gatekeeper warnings."
+echo "Distribution options (free, no Apple Developer account):"
+echo "  - Easiest:       ship the -install.zip — users double-click install.command"
+echo "  - Power users:   ship the .dmg, tell them to run 'xattr -cr /Applications/CCCPlayer.app'"
+echo "  - Paid signing:  swap '--sign -' above for 'Developer ID Application: <name>' + xcrun notarytool"
 echo "------------------------------------------------------------"
