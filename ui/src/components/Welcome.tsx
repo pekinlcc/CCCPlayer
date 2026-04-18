@@ -186,7 +186,7 @@ export function Welcome(props: {
         <span>Workdir</span>
         <code>{workdir.trim() || '—'}</code>
         <span className="spacer" />
-        <span>v1.3.2</span>
+        <span>v1.4.0</span>
       </div>
     </Shell>
   )

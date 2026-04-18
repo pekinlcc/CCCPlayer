@@ -1,5 +1,97 @@
 # CCCPlayer Release Notes
 
+## v1.4.0 · 2026-04-18
+
+Philosophical overhaul of the prompt layer. Every phase now treats
+`GOAL.md` as the only immutable benchmark; everything else — the PRD,
+its milestones, its sub-goals, earlier design decisions — is
+disposable evidence that can (and should) be revised when it stops
+serving the goal.
+
+### Prompts (substantial rewrite)
+
+- **`common.md`** now declares two first-class principles:
+  - *GOAL.md is the lens*: every action (plan / implement / review /
+    refine) must first ask "does this move us closer to what the user
+    asked for?" Actions that can't be tied back to GOAL.md are out of
+    scope.
+  - *Only GOAL.md is sacred — everything else is revisable evidence*.
+    Milestones, sub-goals, earlier design choices, previously
+    accepted findings — all are hypotheses. Change them when evidence
+    contradicts them. Guardrail: pivots require a concrete reason; "I
+    want to try something else" alone isn't enough, to avoid
+    thrashing. Every revision gets a one-line Changelog entry in PRD.
+- **`planning.md`** gains two new steps:
+  - *Step 1 — Goal decomposition*: break `GOAL.md` into the smallest
+    set of independently-verifiable sub-goals, each traceable to a
+    sentence in GOAL.md. These land in a new `## Sub-goals` section
+    of `PRD.md`.
+  - *Step 3 — Self-adversarial check*: before saving, re-read GOAL.md
+    end to end and verify every sentence has a coverage chain
+    sub-goal → scope → design → milestone. Gaps = revise. Also
+    required: think about implementation-path feasibility,
+    dependency risk, performance / platform constraints.
+  - PRD gains a `## Changelog` section. Every later turn that revises
+    the document adds a one-liner so the audit trail is intact.
+- **`implementing.md`** adds a mandatory first step:
+  - Before coding, confirm the next milestone is still the shortest
+    path to GOAL.md given new evidence. If not, pivot: mark the
+    superseded milestone in PRD, add the replacement, log it in
+    Changelog, then implement the NEW next step.
+  - Output now includes `goal_anchor: <sub-goal>` and
+    `plan_revised: <yes/no>` lines.
+- **`reviewing.md`** restructures findings to goal-first:
+  - New `## Goal coverage pass` section lists every sub-goal and
+    judges `delivered | partial | missing` per sub-goal before any
+    code-quality nitpicking.
+  - Every blocking finding now requires a `goal_link` field — which
+    `GOAL.md` sentence or sub-goal the finding relates to. Findings
+    that can't be tied to GOAL.md are automatically non_blocking.
+  - New severity `path_drift`: code is doing what PRD says but PRD
+    itself has drifted from GOAL.md. Fix is a PRD revision, not a
+    code change. `status: approved` requires both `blocking=[]` and
+    `path_drift=[]`.
+- **`refining.md`** requires a `goal_impact` line on every response:
+  - For `accepted` / `partial`: which GOAL.md sub-goal the fix
+    advances.
+  - For `rejected` / `shelved`: why NOT doing this doesn't harm
+    GOAL.md delivery.
+  - New status `stale`: the finding refers to a milestone or design
+    decision that has been superseded in PRD's Changelog; cite the
+    entry and skip.
+- **`goal-check.md`** (unchanged) already evaluates against GOAL.md
+  directly; it's the model for what the other prompts now inherit.
+
+### Notes on side effects
+
+- Review files and Claude responses will be a bit more structured and
+  a bit longer (goal_link, goal_impact, path_drift category). Token
+  cost per cycle goes up a small amount in exchange for a cleaner
+  audit trail back to GOAL.md.
+- Agents are now explicitly allowed to change milestones mid-session.
+  There's a non-zero risk of thrashing — if observed in practice the
+  guardrail wording in `common.md` can be tightened further in a
+  follow-up release.
+
+### Docs
+
+- `PRD.md`: decisions 79-83 cover the philosophy change, goal
+  decomposition, goal-anchored milestones, goal-first review, and
+  goal_impact field respectively.
+- `README.md`: EN + ZH "What's new in v1.4" sections added.
+
+### Artifacts
+
+- `dist/CCCPlayer-1.4.0-arm64-install.zip`  (recommended)
+- `dist/CCCPlayer-1.4.0-arm64.dmg`
+- `dist/CCCPlayer-1.4.0-arm64.app.tar.gz`
+
+No breaking runtime changes — event schema and session.json format
+unchanged from v1.3.x. Existing sessions resume cleanly; the new
+prompts only take effect on turns spawned by this build.
+
+---
+
 ## v1.3.2 · 2026-04-18
 
 Distribution hardening (free tier — no paid Apple Developer account).

@@ -18,42 +18,49 @@
 
 ## English
 
-### What's new in v1.3.1 (2026-04-18)
+### What's new in v1.4.0 (2026-04-18)
 
-- **Claude token count was ~25× under-reported** (stream-json parser
-  was ignoring `cache_read_input_tokens`). Claude is actually the
-  heavyweight per the PRD; display now reflects it correctly.
-- **Long goals now wrap in the Track line** instead of being silently
-  chopped at 60 chars. Hover shows the full goal.
+Philosophical overhaul of the agent prompts. `GOAL.md` is now the only
+immutable benchmark in the system; everything else (PRD milestones,
+sub-goals, earlier design decisions, even accepted review findings) is
+explicitly declared as revisable evidence that agents can — and
+should — change when new information contradicts it.
 
-### What's new in v1.3 (2026-04-18)
+- **`common.md`** declares *"Only GOAL.md is sacred — everything else
+  is revisable evidence"*. Every phase must ask first: does this move
+  us closer to GOAL.md? Guardrail: pivots require a concrete reason,
+  not just "I want to try something else".
+- **Planning** now decomposes `GOAL.md` into a `## Sub-goals` list
+  that later phases trace against; followed by a mandatory
+  self-adversarial check (does every sentence of GOAL have a coverage
+  chain in PRD?). PRD gains a `## Changelog` for revisions.
+- **Implementing** asks, before each turn, *is the next milestone
+  still the shortest remaining path to GOAL?* If not, revise the PRD
+  in-turn instead of mechanically ticking it off. Output includes a
+  `goal_anchor` line.
+- **Reviewing** restructures into a goal-first `## Goal coverage
+  pass`: every sub-goal judged `delivered | partial | missing` before
+  any code nitpicking. Blocking findings require a `goal_link` field
+  pointing to the GOAL.md sentence they relate to. New severity
+  `path_drift` for cases where code follows PRD correctly but PRD
+  itself has drifted from GOAL.
+- **Refining** requires a `goal_impact` line on every response
+  (accept/reject/shelve). New status `stale` for findings that refer
+  to superseded PRD items.
 
-- **Agents can now disagree.** Prompts rewritten: Claude can reject a
-  Codex finding with a concrete technical reason (not just "I
-  disagree"); Codex must then either concede or counter-argue with new
-  info. After 2 rounds of no new argument, either side may SHELVE the
-  item to a dedicated PRD section and both move on. DONE is allowed
-  with non-empty shelved — the contract is "close everything both
-  agree on, ship around philosophical standoffs".
-- **PRD is a living document.** Implementing and refining prompts now
-  let agents update `PRD.md` mid-stream when implementation reveals a
-  design gap. `GOAL.md` stays immutable; everything else serves the
-  goal.
-- **Codex quota detection → auto-pause + auto-resume.** The ~6:1
-  round/review zombie loop from last run (Codex hit its 5-hour quota
-  at round 30, kept exiting 0 with only an ERROR line, orchestrator
-  kept re-ingesting stale review v28) is fixed at three layers:
-  (1) new `TurnOutcome::RateLimited` catches "you've hit your usage
-  limit" / `Retry-After:` patterns,
-  (2) reducer routes RateLimited to PAUSED with `retry_at` parked on
-  session meta,
-  (3) AppState schedules a tokio task that wakes at `retry_at` and
-  re-invokes Start. UI shows a live "⏳ auto-resume in 2h 13m" pill.
-- **REVIEWING must write a new review file.** If Codex "completes" a
-  review without producing `codex_review_v{N+1}.md`, outcome is forced
-  to OutputMalformed regardless of exit code. No more silent spinning.
-- **Shelved block** in the Remaining-to-goal panel shows items both
-  agents agreed to shelve.
+### v1.3 series recap
+
+- **v1.3.2**: ad-hoc codesign + `install.command` one-click installer
+  bundled in `dist/CCCPlayer-<ver>-arm64-install.zip` so third parties
+  can install without hand-typing `xattr`.
+- **v1.3.1**: Claude tokens were ~25× under-reported (parser was
+  ignoring `cache_read_input_tokens`); fixed. Long goals now wrap in
+  the Track line instead of being silently chopped at 60 chars.
+- **v1.3.0**: agent disagreement protocol (accept / partial / reject /
+  shelve); PRD becomes a living document; Codex rate-limit detected
+  and routed to PAUSED with auto-resume scheduler; reviewing must
+  write a new `codex_review_v{N+1}.md` or the turn is classified
+  OutputMalformed.
 
 ### v1.2 recap
 
@@ -260,36 +267,41 @@ This is a personal project — open a PR or file an Issue on GitHub.
 
 ## 中文说明
 
-### v1.3.1 新增（2026-04-18）
+### v1.4.0 新增（2026-04-18）
 
-- **Claude token 统计被低估约 25 倍**（stream-json parser 之前只加
-  `input_tokens + output_tokens`，忘了加 `cache_read_input_tokens`——这个
-  才是大头，每次调用 10k-200k）。导致 Claude 显示 120k vs Codex 3M
-  看起来像 Codex 是主力其实反了。Parser 修正后 Claude 显示的是真实累计。
-- **Track 长目标不再被砍**。之前在 Track 那行 `.slice(0, 60)` 截断，
-  现在让它折行 + 限高滚动，hover 显示完整目标。
+Prompt 层哲学级改造。`GOAL.md` 是全系统**唯一不可变**的评估基准；
+其他一切（PRD、milestone、子目标、过往设计决策、甚至已接受的 review
+findings）都是可被修改的「证据假设」——当新证据推翻旧假设时，agent
+可以、应该去改它。
 
-### v1.3 新增（2026-04-18）
+- **`common.md`** 加入核心原则：*"Only GOAL.md is sacred — everything
+  else is revisable evidence"*。每个 phase 都要先问：这个动作让我们
+  离 GOAL.md 更近吗？Guardrail：必须给出具体证据才能 pivot，不允许
+  「我想换个做法」这种空话（防止反复改主意不落实）。
+- **Planning** 加 Step 1 目标拆解（`GOAL.md` 拆成可独立判 done 的
+  `## Sub-goals` 清单）+ Step 3 保存前自检（逐句对照 GOAL 确认每句都
+  有覆盖链 sub-goal → scope → design → milestone）。PRD 新增
+  `## Changelog` 节记录所有后续修订。
+- **Implementing** 开头强制自问：下一个 milestone 依然是到 GOAL 的最短
+  路径吗？不是就先改 PRD（标记 superseded + Changelog 一行）再动代码。
+  stdout 输出 `goal_anchor` 和 `plan_revised` 字段。
+- **Reviewing** 重构为 goal-first：新增 `## Goal coverage pass` 节先
+  逐个 sub-goal 判 delivered / partial / missing，才进入代码级 findings。
+  每条 blocking 必填 `goal_link`（指回 GOAL.md 的哪句）。新 severity
+  `path_drift`：代码对但 PRD 偏了，修法是改 PRD 不是改代码。
+  `status: approved` 要求 blocking=[] 且 path_drift=[]。
+- **Refining** 要求每条响应都带 `goal_impact` 一句话（accept 的话说
+  为什么让 goal 更近；reject/shelve 的话说为什么不做也不伤 goal）。
+  新 status `stale` 用于已被 PRD Changelog superseded 的 finding。
 
-- **两个 agent 现在可以真正意义上分歧**。prompt 全面重写：Claude 可以
-  技术理由**明确拒绝** Codex 的建议（「性能开销 X」、「API 约束 Y」，不允许
-  只写「我不同意」）；Codex 接收后要么让步、要么拿新论据继续 block。连续 2
-  轮没有新论据，任一方可**搁置**该项到 PRD 的 `## Shelved disagreements`
-  段，双方都不能再以此 block。DONE 允许 shelved 非空——只要没达成一致的部分
-  都有明确记录。
-- **PRD 是活文档**。implementing / refining prompt 现在明确允许 agent 在实现
-  过程中更新 `PRD.md`（现状变了、设计决策修正等），`GOAL.md` 永不可改。
-- **Codex 配额耗尽自动暂停+自动恢复**。上一轮实测的 166 轮 vs 28 review 僵死
-  循环（Codex round 30 起一直报 usage limit 但退出码 0，orchestrator 把旧的
-  v28 review 当新的反复吃）在三层都修了：
-  (1) runner 识别 `"you've hit your usage limit"` / `Retry-After:` 等关键词
-  产生新的 `TurnOutcome::RateLimited`；
-  (2) reducer 把 RateLimited 路由到 PAUSED，retry_at 存入 session meta；
-  (3) AppState 启一个 tokio 定时器，到点自动调 Start 恢复。UI 上有实时倒计时
-  `⏳ auto-resume in 2h 13m` 小标签。
-- **REVIEWING 必须产生新 review 文件**。Codex 跑完没写 `codex_review_v{N+1}.md`
-  直接降级为 OutputMalformed，不管退出码。再也不会闷头转。
-- **Shelved 区块**在 Remaining-to-goal 面板里显示双方搁置的项。
+### v1.3 系列回顾
+
+- **v1.3.2**：ad-hoc 签名 + `install.command` 一键安装脚本，打包到
+  `dist/CCCPlayer-<ver>-arm64-install.zip`，第三方装机不用手工 `xattr`。
+- **v1.3.1**：Claude token 被低估 25× 修复；Track 长目标折行不截断。
+- **v1.3.0**：双 agent 分歧协议（accept / partial / reject / shelve）；
+  PRD 成为活文档；Codex 配额耗尽 → PAUSED + 自动恢复定时器；REVIEWING
+  没产生新 review 文件直接降级 OutputMalformed。
 
 ### v1.2 回顾
 
