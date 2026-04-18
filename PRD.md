@@ -277,7 +277,8 @@ CCCPlayer 是后台跑长任务的应用。窗口与进程语义必须明确：
   agent，确认？"；确认后走完整 cancel 协议，再退出。
 - 这是为了兑现"烧算力不烧用户时间"——用户随手关窗不能让几小时的工作白费。
 
-### 6.5 目标输入校验
+### 6.5 目标输入校验（idle 态适用）
+
 
 "开始"按钮只在以下条件全部满足时启用：
 - preflight 全绿（CLI 装好、登录、目录已选、auto-approve flag 可用）。
@@ -287,6 +288,47 @@ CCCPlayer 是后台跑长任务的应用。窗口与进程语义必须明确：
 
 不通过时按钮灰显，旁边浮 tooltip 说明哪一项不满足。**不在用户点了"开始"才报错**
 ——按钮的可点性本身就是反馈。
+
+### 6.6 距离目标还有多远 · Remaining-to-goal 面板（v1.1+）
+
+Running 态下 Progress 面板顶部新增一个 **Remaining** 模块，把"是否达成目标"
+这个契约可视化给用户。数据源严格来自 **GOAL_CHECK** 事件——不走 Codex review
+或 PRD 文档，原因是后两者表达的是"还有什么优化点/blocking"，而不是 DONE
+的权威判定。
+
+**契约关联**：状态机的 `GoalCheckResult` reducer 分支只有在两个 agent 都
+`done=true` 时才 transition 到 `Done`；任何一方 `not done` 都会回 REFINING
+继续。Remaining 面板把这个契约完全暴露出来。
+
+**渲染规则**：
+
+1. 顶部 agreement badge 四态：
+   | 场景 | 徽章 | 颜色 |
+   | --- | --- | --- |
+   | 两边都 `done=true` | `✓ both agree · goal met` | lime |
+   | 两边都 `done=false` | `✖ both say not done` | amber |
+   | 一 done 一 not-done | `◐ 1 agent done · 1 disagrees` | magenta |
+   | 有一方还没报过 goal check | `◐ waiting for both agents` | dim |
+   | 两方都还没报过 | `○ waiting for first goal check` | dim |
+
+2. 左右双栏（Claude 左 / Codex 右）：
+   - 列头：agent 名（按配色，Claude cyan / Codex magenta）+ `N missing` 或
+     `✓ done` + `round N · 3m 12s ago`
+   - 主体：`missing[]` 字符串列表（最多前 8 条，超出显示 `+ N more…`）；
+     如果 `done=true` 则显示 `rationale`
+   - 刻意不做跨两列的模糊字符串合并"共识"计算——item 级的语义去重本身不
+     可靠（近义不同词会漏、短句会误判），强行合并会制造不存在的 agreement。
+     当两列都短（各 0-3 条）时，肉眼 diff 足够；当两列都长时，这也诚实地
+     传达"双方对'还差什么'理解还不一致"本身就是信息。
+
+**刷新时机**：订阅 `cccplayer://event` 里的 `goal_check` 事件；每收到一条就
+更新对应 agent 的最新快照。GOAL_CHECK 阶段在每个 REVIEWING → REFINING 循环
+末尾跑（双 agent 并行），所以面板每 5-30 分钟刷一次。两次 GOAL_CHECK 之间
+就显示上次的快照带 age 标签。
+
+**空态**：session 刚启动、第一次 GOAL_CHECK 还没跑过时显示
+`○ waiting for first goal check`，下方一行提示"Goal checks run at the end of
+each review cycle. First one usually lands a few minutes in."
 
 ## 7. "开始"按钮的决策树
 
@@ -1122,6 +1164,11 @@ next_state rules:
 | 59 | usage 解析兼容 Claude 嵌套 + Codex 明文 | `parse_usage_line` 同时认扁平 `{"type":"usage",…}`（fake CLI）和嵌套 `{"type":"assistant","message":{…,"usage":{…}}}`（真实 Claude）；Codex 走 `parse_codex_total_tokens` 扫 `tokens used\n<N>` 明文对。 | §16.7 |
 | 60 | Claude stream-json goal-check 文本抽取 | `extract_claude_text()` 从每行 `assistant.content[*].text` 和 `result.result` 拼回模型真实回复，再喂给 `parse_goal_check`。否则原始 stdout 的 JSON 外壳会让 `extract_json_block` 找不到可解析的 `{done,…}`。plain-text 输出走 fallback 不变。 | §16.3、§16.8 |
 | 61 | 原始日志事件通道 | orchestrator 多挂一个 `raw_sink: mpsc::UnboundedSender<RawLogLine>`，每行 stdout/stderr 附上 agent/phase/round 推到 `cccplayer://raw` Tauri 事件；UI 2000 行环形缓冲。 | §6.1 |
+| 62 | state_changed payload 大小写（v1.1 修复） | reducer 用 `format!("{to:?}/{phase:?}")` 产 CamelCase（`Running/Implementing`、`Errored/Refining`）；UI 原正则 `^([A-Z]+)\/([A-Z_]+)$` 要求全大写永远不匹配 → phase 卡初始值、`onDone` 从不触发、Errored 会话 UI 仍显示 RUNNING。改为大小写不敏感 + CamelCase→SCREAMING_SNAKE_CASE 归一化。 | §6.1 |
+| 63 | GoalCheck 事件携全量 missing[] + rationale（v1.1） | 之前只记 `missing_count` 无法支撑 UI 的「距离目标」展示。扩 `EventKind::GoalCheck` 和 `StateCommand::GoalCheckResult` 两处加 `missing: Vec<String>` 与 `rationale: String`，`#[serde(default)]` 保证旧日志仍可回放。 | §6.6 |
+| 64 | Remaining-to-goal 双栏 + agreement badge（v1.1） | Progress 面板新增模块，左右各自渲染 Claude / Codex 最新 GOAL_CHECK 的 missing 列表与 rationale，顶部徽章聚合 both-done / both-not-done / split / waiting 四态，与状态机「两方都 done=true 才进 DONE」契约一致。刻意不做 item 级模糊匹配（fuzzy 字符串合并为"共识"过度承诺），以两份独立列表并排最诚实。 | §6.6 |
+| 65 | Tokens 按 agent 分行标签化（v1.1） | 原先 `N + M` 单行难分归属；改双行 `Claude N` / `Codex N`，label 按 agent 上色（cyan / magenta）、数字 lime 保留强调。 | §6 视觉设计语言 |
+| 66 | 原生目录选择器（v1.1） | 新增 `tauri-plugin-dialog` 依赖 + `dialog:allow-open` capability。Welcome 的 FOLDER 行加 `Browse…` 按钮，`pickFolder()` 包装 `@tauri-apps/plugin-dialog` 的 `open({directory:true})`，回传路径触发现有 classify 流程。 | §6.2 |
 
 ---
 

@@ -292,6 +292,8 @@ impl Orchestrator {
                         agent: Agent::Claude,
                         done: g.done,
                         missing_count: g.missing.len() as u32,
+                        missing: g.missing.clone(),
+                        rationale: g.rationale.clone(),
                     });
                     self.apply_effects(effs, events_tx).await?;
                 }
@@ -300,6 +302,8 @@ impl Orchestrator {
                         agent: Agent::Codex,
                         done: g.done,
                         missing_count: g.missing.len() as u32,
+                        missing: g.missing.clone(),
+                        rationale: g.rationale.clone(),
                     });
                     self.apply_effects(effs, events_tx).await?;
                 }

@@ -67,6 +67,17 @@ pub enum EventKind {
         agent: Agent,
         done: bool,
         missing_count: u32,
+        /// Full missing-item list the agent reported in its goal-check JSON.
+        /// Empty when `done == true`. Older event logs (before v1.1) lack
+        /// this field entirely — serde default makes it an empty vec so
+        /// replaying historical logs still works.
+        #[serde(default)]
+        missing: Vec<String>,
+        /// The `rationale` string the agent produced in the same goal-check
+        /// JSON. Useful for showing *why* the agent thinks the goal is (or
+        /// isn't) met.
+        #[serde(default)]
+        rationale: String,
     },
     StateChanged {
         to: String,

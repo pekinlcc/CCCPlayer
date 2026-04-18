@@ -71,3 +71,12 @@ export interface RawLogLine {
   stream: RawStream
   line: string
 }
+
+// Snapshot of one agent's most recent goal-check output (v1.1+).
+export interface GoalCheckSnapshot {
+  at: string
+  round: number
+  done: boolean
+  missing: string[]
+  rationale: string
+}

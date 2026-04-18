@@ -26,6 +26,7 @@ fn main() {
         suppress_app_nap();
 
         tauri::Builder::default()
+            .plugin(tauri_plugin_dialog::init())
             .manage(crate::app_state::AppState::new())
             .invoke_handler(tauri::generate_handler![
                 crate::commands::preflight,

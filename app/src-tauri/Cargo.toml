@@ -15,6 +15,7 @@ tauri = [
     "dep:tauri",
     "dep:tauri-build",
     "dep:tauri-plugin-notification",
+    "dep:tauri-plugin-dialog",
     "dep:objc2",
     "dep:objc2-foundation",
 ]
@@ -31,6 +32,7 @@ tracing-subscriber.workspace = true
 chrono.workspace = true
 tauri = { version = "2", optional = true , features = [] }
 tauri-plugin-notification = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
 
 # macOS-only: NSProcessInfo.beginActivity for App Nap suppression (§16.12).
 [target.'cfg(target_os = "macos")'.dependencies]

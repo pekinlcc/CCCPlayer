@@ -1,6 +1,12 @@
 import type { ReactNode } from 'react'
 
-export type ShellStatus = 'idle' | 'running' | 'done' | 'stopped' | 'errored'
+export type ShellStatus =
+  | 'idle'
+  | 'running'
+  | 'paused'
+  | 'done'
+  | 'stopped'
+  | 'errored'
 
 // Winamp-style outer chrome. Every screen wears this shell; the inner
 // composition of display / transport / progress panel / footer comes from
@@ -17,7 +23,11 @@ export function Shell(props: { status: ShellStatus; statusLabel: string; childre
         <span className="spacer" />
         <span className={`status ${props.status}`}>
           {props.status === 'running' && '▶ '}
+          {props.status === 'paused' && '⏸ '}
           {props.status === 'idle' && '◇ '}
+          {props.status === 'errored' && '✖ '}
+          {props.status === 'done' && '✓ '}
+          {props.status === 'stopped' && '■ '}
           {props.statusLabel.toUpperCase()}
         </span>
       </div>

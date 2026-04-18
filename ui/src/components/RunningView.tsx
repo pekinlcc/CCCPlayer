@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { pauseSession, stopSession, subscribeEvents, subscribeRawLog } from '../api'
-import type { Event, Phase, RawLogLine, SessionState } from '../types'
+import type { Event, GoalCheckSnapshot, Phase, RawLogLine, SessionState } from '../types'
 import { Meter, PauseIcon, PlayIcon, Shell, StopIcon } from './Shell'
+import type { ShellStatus } from './Shell'
 
 const RAW_LOG_CAP = 2000
 
@@ -47,6 +48,11 @@ export function RunningView(props: {
   const [nowTick, setNowTick] = useState(0)
   const [pausing, setPausing] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [sessionState, setSessionState] = useState<SessionState>('RUNNING')
+  // Latest goal-check snapshot per agent, powering the "Remaining to goal"
+  // block. Updated whenever a goal_check event lands. See PRD §6.1 / §7.
+  const [claudeGc, setClaudeGc] = useState<GoalCheckSnapshot | null>(null)
+  const [codexGc, setCodexGc] = useState<GoalCheckSnapshot | null>(null)
   const rawScrollRef = useRef<HTMLPreElement | null>(null)
 
   useEffect(() => {
@@ -67,14 +73,21 @@ export function RunningView(props: {
         setLastActivityAt(Date.now())
         const k = String(ev.kind)
         if (k === 'state_changed') {
+          // reducer emits the payload via `format!("{to:?}/{phase:?}")`, so
+          // both halves are Rust Debug — CamelCase ("Errored/Refining",
+          // "Running/GoalCheck", …). Accept any case and normalize to the
+          // SCREAMING_SNAKE_CASE Phase string the UI uses.
           const to = String((ev as { to?: string }).to ?? '')
-          const match = /^([A-Z]+)\/([A-Z_]+)$/.exec(to)
+          const match = /^([A-Za-z]+)\/([A-Za-z]+)$/.exec(to)
           if (match) {
-            const nextPhase = match[2] as Phase
-            setPhase(nextPhase)
-            if (to.startsWith('Done')) props.onDone('DONE')
-            if (to.startsWith('Abandoned')) props.onDone('ABANDONED')
-            if (to.startsWith('Errored')) props.onDone('ERRORED')
+            const state = match[1].toLowerCase()
+            setPhase(camelToScreamingSnake(match[2]) as Phase)
+            if (state === 'done') props.onDone('DONE')
+            if (state === 'abandoned') props.onDone('ABANDONED')
+            if (state === 'errored') props.onDone('ERRORED')
+            // Paused/Running/Created stay on the Running screen; the
+            // titlebar status follows `sessionState`.
+            setSessionState(state.toUpperCase() as SessionState)
           }
         }
         if (typeof ev.round === 'number') setRound(ev.round + 1)
@@ -87,6 +100,21 @@ export function RunningView(props: {
         if (k === 'agent_finished') {
           const outcome = String((ev as { outcome?: string }).outcome ?? '')
           if (FAILING_OUTCOMES.has(outcome)) setFailCount((n) => n + 1)
+        }
+        if (k === 'goal_check') {
+          const agent = String((ev as { agent?: string }).agent ?? '')
+          const snap: GoalCheckSnapshot = {
+            at: String(ev.at),
+            round: typeof ev.round === 'number' ? ev.round : 0,
+            done: Boolean((ev as { done?: boolean }).done),
+            missing:
+              (ev as { missing?: string[] }).missing ??
+              // Older logs (pre-v1.1) only carry missing_count; fall back.
+              [],
+            rationale: String((ev as { rationale?: string }).rationale ?? ''),
+          }
+          if (agent === 'claude') setClaudeGc(snap)
+          else if (agent === 'codex') setCodexGc(snap)
         }
       })
     })()
@@ -130,8 +158,24 @@ export function RunningView(props: {
 
   const trackLabel = props.goal.split('\n')[0].slice(0, 60) || 'session'
 
+  // Map reducer-reported SessionState to the shell's status badge. Done /
+  // Abandoned / Errored route away via props.onDone, so the only values we
+  // really render here are CREATED / RUNNING / PAUSED.
+  const shellStatus: ShellStatus =
+    sessionState === 'PAUSED' ? 'paused'
+    : sessionState === 'ERRORED' ? 'errored'
+    : sessionState === 'DONE' ? 'done'
+    : sessionState === 'ABANDONED' ? 'stopped'
+    : 'running'
+  const shellLabel =
+    sessionState === 'PAUSED' ? 'Paused'
+    : sessionState === 'ERRORED' ? 'Errored'
+    : sessionState === 'DONE' ? 'Done'
+    : sessionState === 'ABANDONED' ? 'Stopped'
+    : 'Running'
+
   return (
-    <Shell status="running" statusLabel="Running">
+    <Shell status={shellStatus} statusLabel={shellLabel}>
       <div className="display">
         <div className="dline">
           <span className="label">Track</span>
@@ -214,13 +258,23 @@ export function RunningView(props: {
           </span>
         </div>
 
+        <RemainingBlock claude={claudeGc} codex={codexGc} />
+
         <div className="kv-grid">
           <KV label="Elapsed" big={formatElapsed(elapsed)} />
-          <KV
-            label="Tokens"
-            big={`${claudeTokens.toLocaleString()} + ${codexTokens.toLocaleString()}`}
-            color="lime"
-          />
+          <div className="kv tokens-kv">
+            <span className="label">Tokens</span>
+            <div className="tokens-split">
+              <div className="pair">
+                <span className="who claude">Claude</span>
+                <span className="num">{claudeTokens.toLocaleString()}</span>
+              </div>
+              <div className="pair">
+                <span className="who codex">Codex</span>
+                <span className="num">{codexTokens.toLocaleString()}</span>
+              </div>
+            </div>
+          </div>
           <KV
             label="Last activity"
             big={formatSince(sinceLastActivity)}
@@ -364,10 +418,145 @@ function formatSince(secs: number): string {
   return `${m}m ${s}s ago`
 }
 
+// "Refining" → "REFINING", "GoalCheck" → "GOAL_CHECK", "Idle" → "IDLE".
+// The reducer emits state_changed payloads via Rust Debug, which for fieldless
+// enum variants is CamelCase; the UI Phase type is SCREAMING_SNAKE_CASE.
+function camelToScreamingSnake(camel: string): string {
+  return camel
+    .replace(/([A-Z])/g, '_$1')
+    .replace(/^_/, '')
+    .toUpperCase()
+}
+
 function formatRawTs(iso: string): string {
   try {
     const d = new Date(iso)
     return d.toLocaleTimeString()
+  } catch {
+    return iso
+  }
+}
+
+// ─── Remaining to goal (v1.1) ─────────────────────────────────────────────
+//
+// Dual-column view of the latest goal-check result from each agent, plus an
+// agreement badge summarising whether both say the goal is met. We do not
+// attempt fuzzy cross-matching between the two missing[] lists — PRD §6.6:
+// the contract is "both agents must independently answer done=true for the
+// session to transition to DONE", so showing each list as-is is both the
+// most honest and the simplest possible surface. Once both are short (0–3
+// items each) the user can eyeball the overlap.
+function RemainingBlock(props: {
+  claude: GoalCheckSnapshot | null
+  codex: GoalCheckSnapshot | null
+}) {
+  const { claude, codex } = props
+  const hasAny = claude != null || codex != null
+
+  if (!hasAny) {
+    return (
+      <div className="remaining remaining-empty">
+        <div className="rhead">
+          <span className="lbl">▸ Remaining to goal</span>
+          <span className="badge badge-waiting">○ waiting for first goal check</span>
+        </div>
+        <div className="rhint">
+          Goal checks run at the end of each review cycle. First one usually
+          lands a few minutes in.
+        </div>
+      </div>
+    )
+  }
+
+  const badge = agreementBadge(claude, codex)
+
+  return (
+    <div className="remaining">
+      <div className="rhead">
+        <span className="lbl">▸ Remaining to goal</span>
+        <span className={`badge ${badge.cls}`}>{badge.text}</span>
+      </div>
+      <div className="rcols">
+        <RemainingColumn agent="claude" snap={claude} />
+        <RemainingColumn agent="codex" snap={codex} />
+      </div>
+    </div>
+  )
+}
+
+function RemainingColumn(props: {
+  agent: 'claude' | 'codex'
+  snap: GoalCheckSnapshot | null
+}) {
+  const { agent, snap } = props
+  const label = agent === 'claude' ? 'Claude' : 'Codex'
+  if (!snap) {
+    return (
+      <div className={`rcol rcol-${agent}`}>
+        <div className="rcol-head">
+          <span className="who">{label}</span>
+          <span className="dim">not yet reported</span>
+        </div>
+      </div>
+    )
+  }
+  const count = snap.missing.length
+  return (
+    <div className={`rcol rcol-${agent}`}>
+      <div className="rcol-head">
+        <span className="who">{label}</span>
+        <span className={snap.done ? 'done' : 'notdone'}>
+          {snap.done ? '✓ done' : `${count} missing`}
+        </span>
+        <span className="dim">round {snap.round} · {formatAge(snap.at)}</span>
+      </div>
+      {snap.done ? (
+        <div className="rcol-rationale">
+          {snap.rationale || 'reports goal met'}
+        </div>
+      ) : count === 0 ? (
+        <div className="rcol-rationale dim">
+          no specific items listed — {snap.rationale || 'no rationale given'}
+        </div>
+      ) : (
+        <ol className="rcol-list">
+          {snap.missing.slice(0, 8).map((m, i) => (
+            <li key={i}>{m}</li>
+          ))}
+          {snap.missing.length > 8 && (
+            <li className="dim">+ {snap.missing.length - 8} more…</li>
+          )}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+function agreementBadge(
+  claude: GoalCheckSnapshot | null,
+  codex: GoalCheckSnapshot | null,
+): { cls: string; text: string } {
+  if (!claude || !codex) {
+    return { cls: 'badge-partial', text: '◐ waiting for both agents' }
+  }
+  if (claude.done && codex.done) {
+    return { cls: 'badge-agree-done', text: '✓ both agree · goal met' }
+  }
+  if (!claude.done && !codex.done) {
+    return { cls: 'badge-agree-work', text: '✖ both say not done' }
+  }
+  return { cls: 'badge-split', text: '◐ 1 agent done · 1 disagrees' }
+}
+
+function formatAge(iso: string): string {
+  try {
+    const ageMs = Date.now() - new Date(iso).getTime()
+    const secs = Math.max(0, Math.floor(ageMs / 1000))
+    if (secs < 60) return `${secs}s ago`
+    const mins = Math.floor(secs / 60)
+    if (mins < 60) return `${mins}m ago`
+    const hrs = Math.floor(mins / 60)
+    return `${hrs}h ${mins % 60}m ago`
   } catch {
     return iso
   }

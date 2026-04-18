@@ -97,3 +97,21 @@ export async function subscribeRawLog(
     return () => {}
   }
 }
+
+// Open the native macOS folder-picker. Returns the chosen absolute path,
+// or `null` if the user cancelled. No-op outside Tauri.
+export async function pickFolder(defaultPath?: string): Promise<string | null> {
+  try {
+    const mod = await import('@tauri-apps/plugin-dialog')
+    const result = await mod.open({
+      directory: true,
+      multiple: false,
+      defaultPath,
+      title: 'Choose a workspace folder',
+    })
+    if (result == null) return null
+    return typeof result === 'string' ? result : result[0] ?? null
+  } catch {
+    return null
+  }
+}

@@ -18,6 +18,28 @@
 
 ## English
 
+### What's new in v1.1 (2026-04-18)
+
+- **Remaining-to-goal panel**: Progress now shows what Claude and Codex each
+  think is still missing, side by side, with an agreement badge
+  (`both agree · goal met` / `both say not done` / `1 agent done · 1
+  disagrees` / `waiting for first goal check`). Since the state machine
+  transitions to `DONE` only when both independently report `done=true`,
+  this surface is exactly the completion contract.
+- **Per-agent token labels**: the Tokens KV splits into `Claude N` + `Codex N`
+  rows so you can see where the budget is going.
+- **Native folder picker**: FOLDER row gains a `Browse…` button (macOS
+  dialog) via `tauri-plugin-dialog`.
+- **Fixed**: title-bar status was stuck at `▶ RUNNING` even after the session
+  errored, because the UI regex didn't accept the reducer's CamelCase
+  `state_changed` payload. Pause/Stop buttons looked broken but were
+  actually fine — there was just no live turn left to cancel. Regex is
+  case-insensitive now and status follows the reducer truthfully.
+- **Event schema** (internal): `GoalCheck` events now carry the full
+  `missing[]` list + `rationale`. Older logs still parse.
+
+Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+
 ### What is this
 
 Set a local folder + describe a goal in plain English (e.g. *"pixel-perfect
@@ -55,8 +77,8 @@ Latest Apple Silicon build lives in [`dist/`](dist/):
 
 | File | Size | Use |
 | --- | --- | --- |
-| [`CCCPlayer-0.1.0-arm64.dmg`](dist/CCCPlayer-0.1.0-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
-| [`CCCPlayer-0.1.0-arm64.app.tar.gz`](dist/CCCPlayer-0.1.0-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
+| [`CCCPlayer-1.1.0-arm64.dmg`](dist/CCCPlayer-1.1.0-arm64.dmg) | 5.3 MB | Double-click to mount, drag to `/Applications` |
+| [`CCCPlayer-1.1.0-arm64.app.tar.gz`](dist/CCCPlayer-1.1.0-arm64.app.tar.gz) | 4.2 MB | Extract to get `.app` directly |
 
 Apple Silicon only for now (M1/M2/M3/M4). Intel builds can be produced from
 source (see *Build from source* below).
@@ -193,6 +215,27 @@ This is a personal project — open a PR or file an Issue on GitHub.
 
 ## 中文说明
 
+### v1.1 新增（2026-04-18）
+
+- **「距离目标还有多远」面板**：Progress 里新增模块，左右并排显示 Claude
+  和 Codex 各自最新的 GOAL_CHECK 结果（missing 列表 + rationale + 轮次 +
+  时间），顶部一个 agreement 徽章告诉你「双方是否一致」（`both agree · goal
+  met` / `both say not done` / `1 agent done · 1 disagrees` / `waiting for
+  first goal check`）。状态机本来就要求两边都 `done=true` 才进 DONE——这个
+  面板把这个契约可视化。
+- **Token 按 agent 分开标注**：原来 `120,360 + 3,021,158` 看不出谁是谁，现在
+  拆成 `Claude 120,360` + `Codex 3,021,158`，label 按 agent 颜色区分。
+- **本地目录选择器**：FOLDER 输入框右侧加 `Browse…` 按钮，走 macOS 原生目录
+  选择对话框（新依赖 `tauri-plugin-dialog`）。
+- **修复**：之前 session 明明已经 Errored，标题栏却一直显示 `▶ RUNNING`；点
+  Pause 看起来不生效——其实是 UI 的 state_changed 正则只认全大写，错过了
+  reducer 发出的 CamelCase（`Running/Implementing`、`Errored/Refining`）。
+  状态一直没刷进 UI。已修。
+- **事件 schema**（内部）：`GoalCheck` 事件现在带全量 `missing[]` + `rationale`。
+  旧日志用 serde default 仍兼容。
+
+完整变更见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
+
 ### 这是什么
 
 **CCCPlayer（Claude Code & Codex Player）**。叫「Player」是想到当年的 Winamp。
@@ -227,8 +270,8 @@ codex login
 
 | 文件 | 大小 | 用途 |
 | --- | --- | --- |
-| [`CCCPlayer-0.1.0-arm64.dmg`](dist/CCCPlayer-0.1.0-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
-| [`CCCPlayer-0.1.0-arm64.app.tar.gz`](dist/CCCPlayer-0.1.0-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
+| [`CCCPlayer-1.1.0-arm64.dmg`](dist/CCCPlayer-1.1.0-arm64.dmg) | 5.3 MB | 双击装；拖进 `/Applications` |
+| [`CCCPlayer-1.1.0-arm64.app.tar.gz`](dist/CCCPlayer-1.1.0-arm64.app.tar.gz) | 4.2 MB | 解压即得 `.app` |
 
 目前只有 Apple Silicon（M1/M2/M3/M4）版本。Intel 可以自己编（见下方「从源码编译」）。
 

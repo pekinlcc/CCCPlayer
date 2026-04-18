@@ -33,11 +33,15 @@ pub enum StateCommand {
         verdict: Verdict,
         blocking_count: u32,
     },
-    /// Goal-Check returned for one agent.
+    /// Goal-Check returned for one agent. The full `missing` list and
+    /// `rationale` are carried through so the UI can show a side-by-side
+    /// "distance to goal" view (v1.1+).
     GoalCheckResult {
         agent: Agent,
         done: bool,
         missing_count: u32,
+        missing: Vec<String>,
+        rationale: String,
     },
     /// External event required immediate pause.
     ForcePause { reason: String },
@@ -283,6 +287,8 @@ impl Reducer {
                 agent,
                 done,
                 missing_count,
+                missing,
+                rationale,
             } => {
                 effects.push(Effect::Emit(Event::new(
                     self.meta.round,
@@ -290,6 +296,8 @@ impl Reducer {
                         agent,
                         done,
                         missing_count,
+                        missing,
+                        rationale,
                     },
                 )));
                 match agent {
@@ -468,11 +476,15 @@ mod tests {
             agent: Agent::Claude,
             done: true,
             missing_count: 0,
+            missing: Vec::new(),
+            rationale: String::new(),
         });
         let eff = r.handle(StateCommand::GoalCheckResult {
             agent: Agent::Codex,
             done: true,
             missing_count: 0,
+            missing: Vec::new(),
+            rationale: String::new(),
         });
         assert!(matches!(r.meta().state, SessionState::Done));
         assert!(eff.iter().any(|e| matches!(e, Effect::NotifyDone)));

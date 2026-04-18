@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { classifyWorkdir, runPreflight, startSession } from '../api'
+import { classifyWorkdir, pickFolder, runPreflight, startSession } from '../api'
 import type { PreflightReport, SafetyVerdict } from '../types'
 import { Meter, PauseIcon, PlayIcon, Shell, StopIcon } from './Shell'
 
@@ -80,6 +80,17 @@ export function Welcome(props: {
             autoCapitalize="off"
             autoCorrect="off"
           />
+          <button
+            type="button"
+            className="browse-btn"
+            title="Pick a local folder"
+            onClick={async () => {
+              const picked = await pickFolder(workdir.trim() || undefined)
+              if (picked) setWorkdir(picked)
+            }}
+          >
+            Browse…
+          </button>
         </div>
 
         <div className="goal-box">
@@ -175,7 +186,7 @@ export function Welcome(props: {
         <span>Workdir</span>
         <code>{workdir.trim() || '—'}</code>
         <span className="spacer" />
-        <span>v0.1.0</span>
+        <span>v1.1.0</span>
       </div>
     </Shell>
   )

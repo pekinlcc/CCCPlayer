@@ -180,6 +180,27 @@ html, body, #root {
 .pathfield::placeholder { color: var(--dim); }
 .pathfield:focus { border-color: var(--cyan); box-shadow: inset 0 0 8px rgba(0, 229, 255, 0.2); }
 
+/* FOLDER row native picker (v1.1) */
+.browse-btn {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  padding: 7px 12px;
+  background: linear-gradient(180deg, #262637, #121220);
+  border: 1px solid #0a0a12;
+  border-top-color: #3a3a52;
+  color: var(--cyan);
+  text-shadow: 0 0 4px rgba(0, 229, 255, 0.35);
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.browse-btn:hover {
+  border-color: var(--cyan);
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+}
+
 .minibtn {
   font: inherit;
   font-size: 10.5px;
@@ -601,3 +622,107 @@ html, body, #root {
 @keyframes blink { 50% { opacity: 0; } }
 
 .hidden { display: none !important; }
+
+/* ───────── Remaining to goal block (v1.1) ────────────────────── */
+.remaining {
+  border: 1px solid #1a1a2e;
+  background: linear-gradient(180deg, rgba(0, 229, 255, 0.04), rgba(0, 0, 0, 0.2));
+  border-radius: 3px;
+  padding: 10px 12px 12px;
+  margin-bottom: 14px;
+}
+.remaining .rhead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.remaining .lbl {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--cyan);
+  text-shadow: 0 0 5px rgba(0, 229, 255, 0.4);
+  font-weight: 700;
+}
+.remaining .badge {
+  font-size: 11px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  font-weight: 600;
+}
+.remaining .badge-agree-done { color: var(--lime);    text-shadow: 0 0 6px rgba(186, 255, 41, 0.5); }
+.remaining .badge-agree-work { color: var(--amber);   text-shadow: 0 0 6px rgba(255, 179, 71, 0.5); }
+.remaining .badge-split      { color: var(--magenta); text-shadow: 0 0 6px rgba(255, 47, 214, 0.5); }
+.remaining .badge-partial,
+.remaining .badge-waiting    { color: var(--dim); border-color: var(--dim); }
+.remaining .rhint {
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.remaining-empty { padding-bottom: 10px; }
+.remaining .rcols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.remaining .rcol {
+  background: #02020a;
+  border: 1px solid #0a0a14;
+  border-radius: 3px;
+  padding: 8px 10px;
+  min-height: 60px;
+}
+.remaining .rcol-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+.remaining .rcol-claude .who { color: var(--cyan);    text-shadow: 0 0 4px rgba(0, 229, 255, 0.4); font-weight: 700; }
+.remaining .rcol-codex  .who { color: var(--magenta); text-shadow: 0 0 4px rgba(255, 47, 214, 0.4); font-weight: 700; }
+.remaining .rcol-head .done    { color: var(--lime);   text-shadow: 0 0 4px rgba(186, 255, 41, 0.4); }
+.remaining .rcol-head .notdone { color: var(--amber); }
+.remaining .rcol-head .dim     { color: var(--dim); font-size: 10px; letter-spacing: 1px; margin-left: auto; text-transform: none; }
+.remaining .rcol-list {
+  list-style: disc inside;
+  padding: 0;
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+.remaining .rcol-list li { padding: 2px 0; }
+.remaining .rcol-list li.dim { list-style: none; color: var(--dim); font-style: italic; }
+.remaining .rcol-rationale {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink);
+  opacity: 0.9;
+}
+.remaining .rcol-rationale.dim { color: var(--dim); font-style: italic; }
+
+/* ───────── Tokens split KV (v1.1) ─────────────────────────────── */
+.kv.tokens-kv { display: flex; flex-direction: column; gap: 4px; }
+.tokens-split { display: flex; flex-direction: column; gap: 4px; }
+.tokens-split .pair {
+  display: flex; align-items: baseline; gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.tokens-split .who {
+  font-size: 9.5px; letter-spacing: 1.6px; text-transform: uppercase;
+  min-width: 54px; font-weight: 700;
+}
+.tokens-split .who.claude { color: var(--cyan);    text-shadow: 0 0 4px rgba(0, 229, 255, 0.4); }
+.tokens-split .who.codex  { color: var(--magenta); text-shadow: 0 0 4px rgba(255, 47, 214, 0.4); }
+.tokens-split .num {
+  font-size: 15px; letter-spacing: 1.6px; font-weight: 700; color: var(--lime);
+  text-shadow: 0 0 5px rgba(186, 255, 41, 0.45);
+}
