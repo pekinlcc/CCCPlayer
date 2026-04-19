@@ -18,106 +18,6 @@
 
 ## English
 
-### What's new in v1.5.0 (2026-04-19)
-
-Fixes the "CLI Not on PATH" false negative reported by users whose
-`claude` / `codex` are installed via nvm, fnm, asdf, volta, or any
-other node-version manager. When the hardcoded-directory search
-misses, CCCPlayer now runs `$SHELL -l -i -c 'command -v <cli>'`
-(5-second timeout) to ask the user's actual Terminal shell where the
-binary lives. Same rc files as Terminal → same PATH as Terminal.
-
-Also: `augment_path` at startup now dynamically scans
-`~/.nvm/versions/node/*/bin`, `~/.local/share/fnm/node-versions/*/installation/bin`,
-`~/.asdf/shims`, and `~/n/bin` so that `#!/usr/bin/env node` shebang
-scripts (Codex) can find `node` at spawn time even under a version
-manager.
-
-### What's new in v1.4.1 (2026-04-19)
-
-- **Fixed a stagnation-detector false positive** that killed the
-  v1.4.0 test session at round 6. The detector used to push one entry
-  per `GoalCheckResult`, so a two-agent disagreement (Claude=0 /
-  Codex=3 repeating) produced an `[0,3,0,3,…]` sequence that trips the
-  "not strictly decreasing for 3 rounds" guard. Now the reducer waits
-  for both agents per round and pushes a single `max(claude,codex)`
-  entry.
-- **Tightened the shelved-item contract.** Goal-check is strictly
-  read-only — `shelved[]` must mirror PRD's `## Shelved
-  disagreements` section verbatim, not be invented mid-phase.
-  Refining has a mandatory grep check: if it marks anything
-  `status: shelved`, PRD's `## Shelved disagreements` section must
-  contain a matching entry by turn end.
-- **New end-of-session report on the terminal screen** (DONE /
-  STOPPED / ERRORED) showing duration, rounds, per-agent tokens, both
-  agents' final goal checks side by side (done / missing / shelved /
-  rationale), a plain-English reason (stagnation, rate-limit, etc.),
-  a chronological highlights timeline, and links to the artifacts
-  directory.
-
-### What's new in v1.4.0 (2026-04-18)
-
-Philosophical overhaul of the agent prompts. `GOAL.md` is now the only
-immutable benchmark in the system; everything else (PRD milestones,
-sub-goals, earlier design decisions, even accepted review findings) is
-explicitly declared as revisable evidence that agents can — and
-should — change when new information contradicts it.
-
-- **`common.md`** declares *"Only GOAL.md is sacred — everything else
-  is revisable evidence"*. Every phase must ask first: does this move
-  us closer to GOAL.md? Guardrail: pivots require a concrete reason,
-  not just "I want to try something else".
-- **Planning** now decomposes `GOAL.md` into a `## Sub-goals` list
-  that later phases trace against; followed by a mandatory
-  self-adversarial check (does every sentence of GOAL have a coverage
-  chain in PRD?). PRD gains a `## Changelog` for revisions.
-- **Implementing** asks, before each turn, *is the next milestone
-  still the shortest remaining path to GOAL?* If not, revise the PRD
-  in-turn instead of mechanically ticking it off. Output includes a
-  `goal_anchor` line.
-- **Reviewing** restructures into a goal-first `## Goal coverage
-  pass`: every sub-goal judged `delivered | partial | missing` before
-  any code nitpicking. Blocking findings require a `goal_link` field
-  pointing to the GOAL.md sentence they relate to. New severity
-  `path_drift` for cases where code follows PRD correctly but PRD
-  itself has drifted from GOAL.
-- **Refining** requires a `goal_impact` line on every response
-  (accept/reject/shelve). New status `stale` for findings that refer
-  to superseded PRD items.
-
-### v1.3 series recap
-
-- **v1.3.2**: ad-hoc codesign + `install.command` one-click installer
-  bundled in `dist/CCCPlayer-<ver>-arm64-install.zip` so third parties
-  can install without hand-typing `xattr`.
-- **v1.3.1**: Claude tokens were ~25× under-reported (parser was
-  ignoring `cache_read_input_tokens`); fixed. Long goals now wrap in
-  the Track line instead of being silently chopped at 60 chars.
-- **v1.3.0**: agent disagreement protocol (accept / partial / reject /
-  shelve); PRD becomes a living document; Codex rate-limit detected
-  and routed to PAUSED with auto-resume scheduler; reviewing must
-  write a new `codex_review_v{N+1}.md` or the turn is classified
-  OutputMalformed.
-
-### v1.2 recap
-
-- GOAL_CHECK now runs after every REVIEWING (not only when Codex
-  approves); Remaining panel refreshes every 2–10 minutes.
-- Resume button after pause.
-- Optimistic `⏸ PAUSING…` / `■ STOPPING…` title-bar feedback.
-
-### v1.1 recap
-
-- Remaining-to-goal panel with dual-column (Claude / Codex) + agreement
-  badge showing the DONE contract (both agents done=true).
-- Per-agent labeled Tokens KV (`Claude N` / `Codex N`).
-- Native `Browse…` folder picker.
-- Fixed: title-bar status / phase display was frozen at initial value
-  due to a CamelCase regex mismatch; Pause looked broken as a result.
-- Event schema: `GoalCheck` carries full `missing[]` + `rationale`.
-
-Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
-
 ### What is this
 
 Set a local folder + describe a goal in plain English (e.g. *"pixel-perfect
@@ -130,6 +30,47 @@ The name is a nod to Winamp: this is a *player* for two code agents.
 Triangle ▶ Play, double-bar ⏸ Pause, square ■ Stop. Neon cyan / magenta / lime
 on black chrome. Everything runs locally; the app itself makes zero network
 calls. Your tokens, your code, your machine.
+
+### Core capabilities
+
+- **Two-agent loop, one state machine.** Claude Code plans and implements; Codex
+  reviews in a separate process. They iterate over a shared `PRD.md` and
+  versioned `codex_review_v{N}.md` files until both agents agree the goal is
+  done. Every transition flows through a single-writer reducer, so the UI
+  never sees torn state.
+- **`GOAL.md` is the only sacred thing.** Your goal is locked — agents
+  literally cannot edit it. Everything else (PRD milestones, sub-goals, already
+  accepted findings) is explicitly revisable evidence; every phase is anchored
+  back to `GOAL.md` with a `goal_anchor` / `goal_impact` line.
+- **Disagreement protocol.** When Claude and Codex disagree on a review
+  finding, the refiner resolves it explicitly as `accept | partial | reject |
+  shelve`. Shelved items are tracked verbatim in PRD's `## Shelved
+  disagreements` — so nothing is silently dropped by agent forgetfulness.
+- **Rate-limit auto-pause + auto-resume.** When Codex exhausts quota, the
+  session transitions to `PAUSED` and a scheduler auto-resumes when the window
+  clears. No manual babysitting at 3 AM.
+- **Stagnation detection.** If the `missing[]` count fails to strictly
+  decrease for 3 rounds, the session ends as `STOPPED` with a plain-English
+  reason — so a stuck loop doesn't silently burn tokens forever.
+- **Per-round snapshots, always rollbackable.** Every round start writes a
+  `tar.zst` into `.cccplayer/snapshots/`. `round-00` is your untouched
+  original code and is never deleted, so any session is rewindable.
+- **Close the window, walk away.** Close ≠ quit — the loop keeps running in
+  the background. Cmd+Q to actually exit (confirms first). App Nap is
+  suppressed so hidden windows don't get throttled.
+- **Robust CLI autodiscovery.** Finds `claude` / `codex` under Homebrew, nvm,
+  fnm, asdf, volta, `n`, and `~/.cargo/bin` — even when Finder-launched.
+  Falls back to a 5-second login-shell probe (`$SHELL -l -i -c 'command -v
+  <cli>'`) so whatever PATH your Terminal sees, CCCPlayer sees too.
+- **Rich end-of-session report.** `DONE` / `STOPPED` / `ERRORED` banner shows
+  duration, rounds, per-agent tokens, both agents' final goal checks side by
+  side (`done` / `missing` / `shelved` / rationale), plain-English exit
+  reason, a chronological highlights timeline, and artifact paths.
+- **Safe-by-default workspace handling.** Home dir and system paths are
+  refused; `.cccplayer/` is auto-added to `.gitignore`; stdout/stderr are
+  redacted inline before they hit disk or the UI.
+- **Zero telemetry.** The app itself makes no network calls. Your Claude +
+  Codex accounts, your tokens, your code, your machine.
 
 ### Prerequisites
 
@@ -284,9 +225,12 @@ Full design in [`PRD.md`](PRD.md). Line-by-line conformance in
   and `.result`.
 - **Codex 0.1x adaptation** — invoked via `codex exec <prompt>`; token count
   scraped from its plain-text `tokens used\n<N>` tail.
-- **Finder-launched PATH fix** — the app prepends Homebrew / nvm / volta /
-  bun / cargo bin dirs to `PATH` at startup so `#!/usr/bin/env node` scripts
-  (Codex) can find `node` even without a Terminal-inherited environment.
+- **Finder-launched PATH fix** — on startup, `augment_path` prepends
+  Homebrew, nvm, fnm, asdf, volta, `n`, bun, and `~/.cargo/bin` to the
+  process `PATH` (dynamically scanning `~/.nvm/versions/node/*/bin` and
+  friends). When that still misses, `preflight::find_cli` falls back to a
+  5-second `$SHELL -l -i -c 'command -v <cli>'` probe so whatever PATH your
+  Terminal sees, CCCPlayer sees too.
 - **Zero telemetry** — no network calls from the app itself.
 
 ### Status
@@ -304,96 +248,6 @@ This is a personal project — open a PR or file an Issue on GitHub.
 
 ## 中文说明
 
-### v1.5.0 新增（2026-04-19）
-
-修复用户反馈的 "CLAUDE CODE CLI: Not on PATH"
-假阴性——claude / codex 装在 nvm / fnm / asdf / volta 等 node 版本管理器
-下时，Finder 启动的 `.app` 无法看到那些带版本号的路径。
-
-- **登录 shell PATH 探测 fallback**：硬编码目录和进程 PATH 都找不到时，
-  运行 `$SHELL -l -i -c 'command -v <cli>'`（5 秒超时）问用户真实
-  Terminal 的 shell。同一套 rc 文件（`.zprofile` / `.zshrc` /
-  `.bash_profile`）→ 同一个 PATH。用户 Terminal 看得到的，CCCPlayer
-  也看得到。
-- **augment_path 动态扫版本管理器目录**：启动时扫
-  `~/.nvm/versions/node/*/bin`、
-  `~/.local/share/fnm/node-versions/*/installation/bin`、
-  `~/.asdf/shims`、`~/n/bin`，保证 `#!/usr/bin/env node` 的 CLI
-  （Codex）启动时能找到 node。
-- 安全：`login_shell_which` 验证输入名只含 `[a-zA-Z0-9_.-]`，杜绝 shell
-  注入；别名 / shell builtin / 函数 / 相对路径一律拒收，只接受可 spawn
-  的绝对路径。
-
-### v1.4.1 新增（2026-04-19）
-
-- **修复停滞检测误判**。v1.4.0 测试 session 在 round 6 被反停滞
-  kill，根因是 `missing_history` 每次 `GoalCheckResult` 推一次——两 agent
-  分歧（Claude=0 / Codex=3 反复）产出 `[0,3,0,3,…]` 序列，满足"连续 3
-  轮未严格递减"触发停滞。改为双方都报完一轮后只推一次 `max(claude, codex)`。
-- **收紧 shelved 合同**。goal-check 严格只读，`shelved[]` 必须照抄 PRD
-  的 `## Shelved disagreements` 节，不能现场发明；refining 加强制
-  grep check——标了 `status: shelved` 就必须在 PRD 里写对应条目，否则算
-  本轮未完成。
-- **结束界面新增执行报告**（DONE / STOPPED / ERRORED）。展示时长、轮数、
-  两 agent 各自 token、双栏显示最终 goal check 分歧（done / missing /
-  shelved / rationale），plain 英文 reason（stagnation / rate-limit 等），
-  按时间轴的高亮事件列表，以及 artifacts 路径。
-
-### v1.4.0 新增（2026-04-18）
-
-Prompt 层哲学级改造。`GOAL.md` 是全系统**唯一不可变**的评估基准；
-其他一切（PRD、milestone、子目标、过往设计决策、甚至已接受的 review
-findings）都是可被修改的「证据假设」——当新证据推翻旧假设时，agent
-可以、应该去改它。
-
-- **`common.md`** 加入核心原则：*"Only GOAL.md is sacred — everything
-  else is revisable evidence"*。每个 phase 都要先问：这个动作让我们
-  离 GOAL.md 更近吗？Guardrail：必须给出具体证据才能 pivot，不允许
-  「我想换个做法」这种空话（防止反复改主意不落实）。
-- **Planning** 加 Step 1 目标拆解（`GOAL.md` 拆成可独立判 done 的
-  `## Sub-goals` 清单）+ Step 3 保存前自检（逐句对照 GOAL 确认每句都
-  有覆盖链 sub-goal → scope → design → milestone）。PRD 新增
-  `## Changelog` 节记录所有后续修订。
-- **Implementing** 开头强制自问：下一个 milestone 依然是到 GOAL 的最短
-  路径吗？不是就先改 PRD（标记 superseded + Changelog 一行）再动代码。
-  stdout 输出 `goal_anchor` 和 `plan_revised` 字段。
-- **Reviewing** 重构为 goal-first：新增 `## Goal coverage pass` 节先
-  逐个 sub-goal 判 delivered / partial / missing，才进入代码级 findings。
-  每条 blocking 必填 `goal_link`（指回 GOAL.md 的哪句）。新 severity
-  `path_drift`：代码对但 PRD 偏了，修法是改 PRD 不是改代码。
-  `status: approved` 要求 blocking=[] 且 path_drift=[]。
-- **Refining** 要求每条响应都带 `goal_impact` 一句话（accept 的话说
-  为什么让 goal 更近；reject/shelve 的话说为什么不做也不伤 goal）。
-  新 status `stale` 用于已被 PRD Changelog superseded 的 finding。
-
-### v1.3 系列回顾
-
-- **v1.3.2**：ad-hoc 签名 + `install.command` 一键安装脚本，打包到
-  `dist/CCCPlayer-<ver>-arm64-install.zip`，第三方装机不用手工 `xattr`。
-- **v1.3.1**：Claude token 被低估 25× 修复；Track 长目标折行不截断。
-- **v1.3.0**：双 agent 分歧协议（accept / partial / reject / shelve）；
-  PRD 成为活文档；Codex 配额耗尽 → PAUSED + 自动恢复定时器；REVIEWING
-  没产生新 review 文件直接降级 OutputMalformed。
-
-### v1.2 回顾
-
-- 每次 REVIEWING 完都跑 GOAL_CHECK（不再等 Codex Approved），Remaining 面板
-  2-10 分钟刷一次。
-- Pause 之后出现 Resume 按钮。
-- Pause/Stop 乐观反馈——点下去立刻 `⏸ PAUSING…` / `■ STOPPING…`。
-
-### v1.1 回顾
-
-- Remaining-to-goal 面板双栏（Claude / Codex）+ agreement 徽章，把「DONE
-  需要双方一致」的契约可视化。
-- Tokens 按 agent 分行标注（`Claude N` / `Codex N`）。
-- 原生 `Browse…` 目录选择器。
-- 修复：state_changed CamelCase 正则 bug 导致 UI 状态永远不刷，Pause 看起来
-  没反应其实是 session 早已 Errored。
-- 事件 schema：`GoalCheck` 带全量 `missing[]` + `rationale`。
-
-完整变更见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
-
 ### 这是什么
 
 **CCCPlayer（Claude Code & Codex Player）**。叫「Player」是想到当年的 Winamp。
@@ -403,6 +257,40 @@ Claude 规划 + 实现，Codex 评审，两者通过共享的 `PRD.md` 和 `code
 反复迭代，直到双方都认为目标已达成。
 
 一次 Play 按下去，然后就可以合盖去干别的。产品哲学是：**烧算力，不烧你的时间。**
+
+### 核心能力
+
+- **双 agent 循环，单写者状态机**。Claude Code 规划 + 实现，Codex 在独立进程
+  里评审，通过共享的 `PRD.md` 和每轮递增版本号的 `codex_review_v{N}.md` 迭代，
+  直到两方都判定目标已达成。所有状态跳转走同一个 reducer，UI 永远不会看到
+  「半个状态」。
+- **`GOAL.md` 是全系统唯一不可变的东西**。你的目标被锁死，agent 不能改。其他
+  一切（PRD 里程碑、子目标、已接受的 review findings）都是**可被新证据推翻的
+  假设**——每个 phase 都要带 `goal_anchor` / `goal_impact` 一句话回扣到
+  `GOAL.md`，证明这步让我们更近而不是漂移。
+- **分歧协议**。Claude 和 Codex 对某条 review 意见不一致时，refiner 必须显式
+  判为 `accept | partial | reject | shelve`。shelved 的条目会照抄进 PRD 的
+  `## Shelved disagreements`，不会因 agent 健忘而悄无声息消失。
+- **配额耗尽自动暂停 + 自动恢复**。Codex 撞到 rate-limit 后 session 自动切
+  `PAUSED`，定时器到点后自动恢复——不用你半夜三点爬起来点按钮。
+- **停滞检测**。连续 3 轮 `missing[]` 不严格递减，session 以 `STOPPED` 收尾
+  并给出 plain 英文原因，避免卡住的循环无声烧 token。
+- **每轮快照，随时回滚**。每轮开始在 `.cccplayer/snapshots/` 里写一个
+  `tar.zst`。`round-00` 是你原始代码的完整备份——永不删除，任何 session 都能
+  回到起点。
+- **关窗走人，session 在后台继续跑**。关窗 ≠ 退出；要真退出用 Cmd+Q（会弹
+  确认）。App Nap 被抑制，隐藏窗口不会被降频。
+- **稳健的 CLI 自动发现**。支持 Homebrew、nvm、fnm、asdf、volta、`n`、
+  `~/.cargo/bin` 下的 `claude` / `codex`，Finder 启动也能找到。找不到时
+  fallback 到 5 秒 login-shell 探测（`$SHELL -l -i -c 'command -v <cli>'`）
+  ——你 Terminal 能看到的 PATH，CCCPlayer 就能看到。
+- **富信息结束报告**。`DONE` / `STOPPED` / `ERRORED` 横幅展示时长、轮数、两
+  agent 各自 token、双栏最终 goal check（`done` / `missing` / `shelved` /
+  rationale）、plain 英文结束原因、按时间轴的事件高亮、产物路径。
+- **默认安全的目录处理**。家目录和系统路径被拒收；`.cccplayer/` 自动加进
+  `.gitignore`；stdout/stderr 入盘 / 进 UI 前实时脱敏。
+- **零遥测**。app 本身不发任何网络请求。你自己的 Claude + Codex 账户，你
+  自己的 token，你自己的代码，你自己的机器。
 
 ### 使用前提
 
@@ -556,9 +444,11 @@ UI 视觉原型图：[`ui/mockups/cyberpunk-preview.html`](ui/mockups/cyberpunk-
   `.message.content[*].text` 与 `.result`。
 - **Codex 0.1x 适配**——走 `codex exec <prompt>`；token 计数扫
   `tokens used\n<N>` 明文。
-- **Finder 启动 PATH 注入**——app 启动时把 Homebrew / nvm / volta / bun / cargo
-  的 bin 目录前插到 `PATH`，保证 `#!/usr/bin/env node` 的 CLI（Codex）也能找到
-  `node`。
+- **Finder 启动 PATH 注入**——启动时 `augment_path` 把 Homebrew、nvm、fnm、
+  asdf、volta、`n`、bun、`~/.cargo/bin` 前插到进程 `PATH`，并动态扫
+  `~/.nvm/versions/node/*/bin` 这类带版本号的目录。都找不到时
+  `preflight::find_cli` 降级到 5 秒 `$SHELL -l -i -c 'command -v <cli>'`
+  探测——Terminal 能看到的 PATH，CCCPlayer 就能看到。
 - **零遥测**——app 本身不发任何网络请求。
 
 ### 当前状态
