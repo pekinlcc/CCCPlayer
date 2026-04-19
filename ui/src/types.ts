@@ -81,3 +81,26 @@ export interface GoalCheckSnapshot {
   shelved: string[]
   rationale: string
 }
+
+// End-of-session execution report that RunningView hands to TerminalState.
+// Lets the terminal screen render a rich report without subscribing to
+// events again. v1.4.1+.
+export interface SessionSummary {
+  /// Terminal state (DONE / ABANDONED / ERRORED).
+  finalState: SessionState
+  /// Human-readable reason (populated from the last relevant `note` event
+  /// if any, e.g. stagnation message, rate-limit reason).
+  reason: string | null
+  /// Total wall-clock seconds from first subscribed event to terminal.
+  elapsedSecs: number
+  /// Last observed round number.
+  round: number
+  /// Last observed token totals.
+  claudeTokens: number
+  codexTokens: number
+  /// Latest goal-check snapshot per agent (may be null if never ran).
+  claudeGc: GoalCheckSnapshot | null
+  codexGc: GoalCheckSnapshot | null
+  /// Full timeline for highlight extraction on the terminal screen.
+  events: Event[]
+}

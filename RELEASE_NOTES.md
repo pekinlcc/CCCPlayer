@@ -1,5 +1,76 @@
 # CCCPlayer Release Notes
 
+## v1.4.1 · 2026-04-19
+
+Root-cause follow-up to the v1.4.0 test session where the stagnation
+detector fired at round 6 because Claude and Codex reached a stable
+disagreement on goal completion — Claude self-shelved items in its
+goal_check JSON, Codex kept listing them as missing because they were
+never written to PRD. Fixes three separate bugs contributing to the
+false stagnation, plus adds a rich execution report on the terminal
+screen.
+
+### Fixed
+
+- **Stagnation detector false positive**. `missing_history` used to get
+  one push per `GoalCheckResult`, so two-agent disagreement like
+  Claude=0 / Codex=3 produced an `[0,3,0,3,0,3]` sequence where the
+  last three `[3,0,3]` aren't strictly decreasing, tripping the
+  "stagnation" guard after the very first goal check. Now the reducer
+  waits until BOTH agents report per round, then pushes a single entry
+  equal to `max(claude_missing, codex_missing)`. A real stuck session
+  still trips the guard; a unilateral "one agent is stricter" pattern
+  no longer does.
+- **Stagnation reason was invisible**. The reducer emitted the
+  "progress stagnated" string through `Effect::NotifyAttention` only,
+  which was discarded by `apply_effects`. The terminal screen then had
+  no way to tell the user WHY the session errored. Both stagnation and
+  rate-limit branches now additionally emit the reason as a `Note`
+  event so it lands in `events.log` and the UI can surface it.
+- **`shelved[]` was being invented by goal-check**. The goal-check
+  prompt allowed Claude to list items in `shelved` that weren't
+  actually in `PRD.md`'s `## Shelved disagreements` section. Since
+  Codex's goal-check reads the real PRD, the two agents' views
+  diverged forever. Prompt tightened: goal-check is read-only,
+  `shelved` must mirror PRD verbatim, and if an item "should" be
+  shelved it goes in `missing` with a note asking the next REFINING to
+  formalize it.
+- **Refining wasn't actually writing shelved items to PRD**. The v1.3
+  prompt said to, but Claude in real sessions was marking items as
+  `status: shelved` in its response and leaving them only in that
+  response. Prompt now includes a **mandatory final grep check**: if
+  you marked anything shelved, `PRD.md`'s `## Shelved disagreements`
+  section must contain a matching entry before the turn ends.
+
+### Added
+
+- **Session report on the terminal screen** (DONE / STOPPED / ERRORED).
+  Replaces the previous one-line banner with:
+  - Duration, rounds, per-agent token totals.
+  - Final goal check from each agent side by side: done / missing /
+    shelved / rationale — so the user can see exactly where the two
+    agents agreed or disagreed at the moment the session ended.
+  - A `reason` line derived from the most recent stagnation / rate-
+    limit / auth note (so "why did it error?" is visible without
+    digging into events.log).
+  - Highlights timeline: curated list of state transitions, reviews
+    written, goal checks, notes, and non-OK agent_finished events. One
+    line per moment, color-coded. Routine heartbeats are omitted.
+  - Artifacts panel pointing at `.cccplayer/events.log`, `transcripts/`,
+    and `snapshots/` inside the workspace.
+  - Actions: `New session (same folder)` and `← Back to start`.
+
+### Schema changes (additive, backward compatible)
+
+- `SessionSummary` (UI-side type) now passes a full end-of-session
+  snapshot from `RunningView` to `TerminalState`; old sessions that
+  navigate to the terminal screen directly gracefully fall back to the
+  legacy plain banner.
+- No Rust event schema changes. Older `events.log` files replay fine
+  (the new UI extraction tolerates missing fields).
+
+---
+
 ## v1.4.0 · 2026-04-18
 
 Philosophical overhaul of the prompt layer. Every phase now treats

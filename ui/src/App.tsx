@@ -2,12 +2,18 @@ import { useState } from 'react'
 import { Welcome } from './components/Welcome'
 import { RunningView } from './components/RunningView'
 import { TerminalState } from './components/TerminalState'
-import type { SessionState } from './types'
+import type { SessionState, SessionSummary } from './types'
 
 type Screen =
   | { kind: 'welcome'; initialWorkdir?: string }
   | { kind: 'running'; workdir: string; goal: string }
-  | { kind: 'terminal'; state: SessionState; workdir: string }
+  | {
+      kind: 'terminal'
+      state: SessionState
+      workdir: string
+      goal: string
+      summary: SessionSummary | null
+    }
 
 export function App() {
   const [screen, setScreen] = useState<Screen>({ kind: 'welcome' })
@@ -27,8 +33,14 @@ export function App() {
           <RunningView
             workdir={screen.workdir}
             goal={screen.goal}
-            onDone={(finalState) =>
-              setScreen({ kind: 'terminal', state: finalState, workdir: screen.workdir })
+            onDone={(finalState, summary) =>
+              setScreen({
+                kind: 'terminal',
+                state: finalState,
+                workdir: screen.workdir,
+                goal: screen.goal,
+                summary,
+              })
             }
           />
         )}
@@ -36,6 +48,8 @@ export function App() {
           <TerminalState
             state={screen.state}
             workdir={screen.workdir}
+            goal={screen.goal}
+            summary={screen.summary}
             onBackToStart={() => setScreen({ kind: 'welcome' })}
             onRetrySameWorkdir={() =>
               setScreen({ kind: 'welcome', initialWorkdir: screen.workdir })

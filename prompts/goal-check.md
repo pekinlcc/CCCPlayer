@@ -24,14 +24,31 @@ Output exactly one fenced JSON block and nothing else outside it:
     {
       "done": true | false,
       "missing": ["<concrete items still required for the goal>"],
-      "shelved": ["<items from PRD's Shelved disagreements that are
-                   relevant context but not blocking done>"],
+      "shelved": ["<titles copied verbatim from PRD.md's
+                   `## Shelved disagreements` section>"],
       "next_state": "DONE" | "PLANNING" | "IMPLEMENTING" | "REFINING",
       "rationale": "<2-3 sentences: what's truly missing, or why the
                    goal is substantively met; call out shelved items
                    explicitly so the user can see the trade-offs>"
     }
     ```
+
+IMPORTANT rules for the `shelved` field (v1.4.1):
+
+- The `shelved` array must ONLY contain items that already exist in
+  `PRD.md`'s `## Shelved disagreements` section. This phase is
+  read-only; you cannot introduce new shelved items here.
+- If `PRD.md` has no `## Shelved disagreements` section, `shelved` MUST
+  be an empty array `[]`.
+- If you believe an item *should* be shelved but isn't yet recorded in
+  PRD: list it in `missing` and explicitly note in `rationale` that
+  "the next REFINING turn should formalize this into
+  `PRD.md`'s `## Shelved disagreements`". Don't pre-shelve here.
+- This constraint exists because the other agent's goal-check reads
+  the same PRD — if you self-shelve items that aren't actually in
+  PRD, the two agents' views diverge, the stagnation detector sees a
+  persistent disagreement, and the session errors out. Shelved
+  disagreements live in PRD or they don't exist.
 
 `next_state` rules:
 

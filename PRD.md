@@ -1195,6 +1195,10 @@ next_state rules:
 | 81 | Goal-anchored milestone selection（v1.4） | implementing.md 开头强制自问：下一个 milestone 对照最新 GOAL 还是最短路径吗？不是就先改 PRD 再动代码。代码改完在 stdout 输出 `goal_anchor: <GOAL 子目标>` 和 `plan_revised: <yes/no>`。 | §17.2 |
 | 82 | Goal-first review 结构（v1.4） | reviewing.md 把 Findings 前置为 "Goal coverage pass"——逐个 sub-goal 判定 delivered/partial/missing；每条 blocking finding 必填 `goal_link`（回指 GOAL.md 的哪句或哪个 sub-goal），追溯性强。新增 severity `path_drift`：code 在按 PRD 做但 PRD 已经偏离 GOAL，修法是改 PRD 不是改代码。`status: approved` 需同时 blocking=[] 且 path_drift=[]。 | §17.4 |
 | 83 | goal_impact 必填（v1.4） | refining.md 要求 Claude 每条 accept/partial/reject/shelve/stale 回应都附 `goal_impact: <一句话>`。accept 要说为什么让我们离 GOAL 更近；reject/shelve 要说为什么不做不伤 GOAL。不写视为回应不完整。新增 status `stale` 用于引用 PRD Changelog 里已 supersede 的 finding。 | §17.3 |
+| 84 | Stagnation 每轮一次累计（v1.4.1） | 原每个 `GoalCheckResult` 就 push 一次 `missing_count`，双 agent 分歧（Claude=0 Codex=3 反复）会生成 `[0,3,0,3]` 序列，连续 3 个不严格递减 → 误触发停滞。修法：新增 `gc_claude_missing`/`gc_codex_missing`，两 agent 都报完 round 才 push 一次 `max(claude,codex)`，清楚反映「本轮是否真的卡住」。 | §11 |
+| 85 | 停滞 / rate-limit 原因同时 emit Note 事件（v1.4.1） | 原来 reducer 的 `NotifyAttention` effect 被 `apply_effects` 丢弃，UI 无法告诉用户「为什么 Errored」。现在同时 push 一个 `EventKind::Note` 到事件流，TerminalState 能读到并在执行报告里显示 reason 行。 | §6.1 |
+| 86 | Shelved 合同强化（v1.4.1） | 实测发现 Claude 的 goal_check 在没有 PRD Shelved 节的情况下自行 shelve 项目，导致 Codex 下一轮 goal_check 继续把它当 missing，误触停滞。修法：goal-check prompt 明确 shelved[] 必须照抄 PRD，不得新增；refining prompt 加 mandatory 尾部 grep check，标 shelved 就必须写到 PRD 否则算未完成。 | §17.3、§17.4 |
+| 87 | TerminalState 执行报告（v1.4.1） | 原来结束屏只有一行 banner。扩成结构化报告：时长 / 轮数 / 双 agent token / 最终 goal check 双栏对比（done/missing/shelved/rationale） / reason（从最近 note 提取） / 按时间轴的高亮事件（state 变化、review verdict、goal_check、错误） / artifacts 路径 / 新 session & 返回起点按钮。`RunningView` 通过 `SessionSummary` 类型把所需数据一次性传给 `TerminalState`，避免 terminal 屏需要自己重订阅事件。 | §6.1 |
 
 ---
 

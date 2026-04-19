@@ -75,8 +75,12 @@ If this refinement implies a design or milestone change, update
 history; supersede rather than silently delete. Goal is to keep
 `PRD.md` an accurate living description of current design.
 
-If you move items to shelved this round, update `PRD.md`'s `## Shelved
-disagreements` section (create if missing):
+## MANDATORY for any status=shelved response (v1.4.1)
+
+If you marked ANY item as `status: shelved` in your response section
+above, you MUST — in this same turn, before closing out — write every
+one of those items into `PRD.md`'s `## Shelved disagreements` section.
+Create the section if it doesn't exist. Format per entry:
 
     ### <item title>
     - first raised in: codex_review_v<N>.md
@@ -84,6 +88,18 @@ disagreements` section (create if missing):
     - Claude position: <one sentence>
     - Codex position (as written): <one sentence>
     - goal impact: <why shelving is safe for the goal>
+
+Why this is mandatory: the next review and goal-check read PRD, not
+your response section. If a shelved item lives only in your response
+and not in PRD, Codex's next goal-check will still see it as missing,
+the two agents' goal-checks will disagree forever, and the session's
+stagnation detector will eventually kill the loop. Shelving is not
+valid until it's recorded in PRD.
+
+Final check before ending the turn: grep `PRD.md` for `## Shelved
+disagreements`. If you marked anything shelved in your response but
+your grep doesn't find a matching entry, your turn is incomplete —
+write the entry and re-save PRD.
 
 ## Consider non_blocking
 

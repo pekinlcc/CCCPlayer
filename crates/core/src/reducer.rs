@@ -85,7 +85,16 @@ pub struct Reducer {
     /// Latest Goal-Check results for current round.
     gc_claude: Option<bool>,
     gc_codex: Option<bool>,
-    /// Missing list sizes across the last few rounds for stagnation detection.
+    /// Per-agent missing count for current round's goal-check. We need both
+    /// so stagnation detection can push ONE entry per round (max of the
+    /// two) instead of one per GoalCheckResult — otherwise an [A,B]
+    /// alternating sequence where the agents disagree looks exactly like
+    /// "progress not decreasing" and the detector fires incorrectly.
+    /// See decision #84 in PRD. Added v1.4.1.
+    gc_claude_missing: Option<u32>,
+    gc_codex_missing: Option<u32>,
+    /// Missing list sizes across the last few rounds for stagnation
+    /// detection. One entry per round (not per GoalCheckResult).
     missing_history: Vec<u32>,
     /// retries counter per (agent, rolling-last-5-turns) for §16.8 flapping.
     recent_retries: Vec<(Agent, u32)>,
@@ -102,6 +111,8 @@ impl Reducer {
             last_verdict: None,
             gc_claude: None,
             gc_codex: None,
+            gc_claude_missing: None,
+            gc_codex_missing: None,
             missing_history: Vec::new(),
             recent_retries: Vec::new(),
             turn_retries: 0,
@@ -216,6 +227,16 @@ impl Reducer {
                             .to_string()
                     }
                 };
+                // v1.4.1: also emit as a Note so the reason survives into
+                // events.log and can be shown on the terminal-state
+                // execution report. NotifyAttention alone is currently
+                // discarded by apply_effects.
+                effects.push(Effect::Emit(Event::new(
+                    self.meta.round,
+                    EventKind::Note {
+                        message: reason.clone(),
+                    },
+                )));
                 effects.push(Effect::NotifyAttention { reason });
             }
             StateCommand::TurnFinished { agent, phase, outcome } => {
@@ -319,6 +340,8 @@ impl Reducer {
                     Verdict::Approved | Verdict::ChangesRequested => {
                         self.gc_claude = None;
                         self.gc_codex = None;
+                        self.gc_claude_missing = None;
+                        self.gc_codex_missing = None;
                         self.transition(&mut effects, SessionState::Running, Phase::GoalCheck);
                         effects.push(Effect::LaunchTurn {
                             agent: Agent::Claude,
@@ -363,27 +386,55 @@ impl Reducer {
                     },
                 )));
                 match agent {
-                    Agent::Claude => self.gc_claude = Some(done),
-                    Agent::Codex => self.gc_codex = Some(done),
+                    Agent::Claude => {
+                        self.gc_claude = Some(done);
+                        self.gc_claude_missing = Some(missing_count);
+                    }
+                    Agent::Codex => {
+                        self.gc_codex = Some(done);
+                        self.gc_codex_missing = Some(missing_count);
+                    }
                 }
                 if let (Some(c), Some(d)) = (self.gc_claude, self.gc_codex) {
                     if c && d {
                         self.transition(&mut effects, SessionState::Done, Phase::Idle);
                         effects.push(Effect::NotifyDone);
                     } else {
-                        // Record missing trend for stagnation detection.
-                        self.missing_history.push(missing_count);
+                        // Push ONE entry per round — the worse of the two
+                        // agents' missing counts. Otherwise a pattern like
+                        // Claude=0, Codex=3 (repeating) looks to the
+                        // stagnation detector like [0,3,0,3,0,3] which has
+                        // non-decreasing subsequences even though the
+                        // conversation isn't actually stuck — one agent
+                        // just consistently says done. See decision #84
+                        // in PRD for the failure mode this fixes.
+                        let worst = self
+                            .gc_claude_missing
+                            .unwrap_or(0)
+                            .max(self.gc_codex_missing.unwrap_or(0));
+                        self.missing_history.push(worst);
                         if self.is_stagnating() {
+                            let reason = format!(
+                                "stagnation detector fired: worst-case missing \
+                                 count did not strictly decrease across last 3 \
+                                 rounds (history: {:?}). One agent may be \
+                                 consistently blocking on the same items — \
+                                 review `codex_review_v*.md` and consider \
+                                 shelving the repeat offenders.",
+                                self.missing_history
+                            );
+                            effects.push(Effect::Emit(Event::new(
+                                self.meta.round,
+                                EventKind::Note {
+                                    message: reason.clone(),
+                                },
+                            )));
                             self.transition(
                                 &mut effects,
                                 SessionState::Errored,
                                 self.meta.phase,
                             );
-                            effects.push(Effect::NotifyAttention {
-                                reason:
-                                    "progress stagnated across 3 rounds; please intervene"
-                                        .into(),
-                            });
+                            effects.push(Effect::NotifyAttention { reason });
                         } else {
                             self.meta.round += 1;
                             self.transition(

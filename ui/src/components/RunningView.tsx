@@ -6,7 +6,14 @@ import {
   subscribeEvents,
   subscribeRawLog,
 } from '../api'
-import type { Event, GoalCheckSnapshot, Phase, RawLogLine, SessionState } from '../types'
+import type {
+  Event,
+  GoalCheckSnapshot,
+  Phase,
+  RawLogLine,
+  SessionState,
+  SessionSummary,
+} from '../types'
 import { Meter, PauseIcon, PlayIcon, Shell, StopIcon } from './Shell'
 import type { ShellStatus } from './Shell'
 
@@ -40,7 +47,7 @@ const PHASE_SHORT: Record<Phase, string> = {
 export function RunningView(props: {
   workdir: string
   goal: string
-  onDone: (state: SessionState) => void
+  onDone: (state: SessionState, summary: SessionSummary) => void
 }) {
   const [phase, setPhase] = useState<Phase>('PLANNING')
   const [round, setRound] = useState(1)
@@ -63,6 +70,18 @@ export function RunningView(props: {
   // Cleared once sessionState leaves PAUSED. Added v1.3.
   const [retryAt, setRetryAt] = useState<string | null>(null)
   const rawScrollRef = useRef<HTMLPreElement | null>(null)
+  // Refs mirror state values so the state_changed handler (which lives
+  // inside a subscribe closure and therefore captures stale React state)
+  // can build a fresh SessionSummary at the moment of terminal
+  // transition. See plumbSummary() below. Added v1.4.1.
+  const eventsRef = useRef<Event[]>([])
+  const roundRef = useRef(1)
+  const elapsedRef = useRef(0)
+  const claudeTokensRef = useRef(0)
+  const codexTokensRef = useRef(0)
+  const claudeGcRef = useRef<GoalCheckSnapshot | null>(null)
+  const codexGcRef = useRef<GoalCheckSnapshot | null>(null)
+  const reasonRef = useRef<string | null>(null)
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -78,7 +97,11 @@ export function RunningView(props: {
     void (async () => {
       unsubscribe = await subscribeEvents((ev) => {
         if (!alive) return
-        setEvents((prev) => [...prev, ev])
+        setEvents((prev) => {
+          const next = [...prev, ev]
+          eventsRef.current = next
+          return next
+        })
         setLastActivityAt(Date.now())
         const k = String(ev.kind)
         if (k === 'state_changed') {
@@ -91,20 +114,28 @@ export function RunningView(props: {
           if (match) {
             const state = match[1].toLowerCase()
             setPhase(camelToScreamingSnake(match[2]) as Phase)
-            if (state === 'done') props.onDone('DONE')
-            if (state === 'abandoned') props.onDone('ABANDONED')
-            if (state === 'errored') props.onDone('ERRORED')
+            if (state === 'done') props.onDone('DONE', buildSummary('DONE'))
+            if (state === 'abandoned')
+              props.onDone('ABANDONED', buildSummary('ABANDONED'))
+            if (state === 'errored')
+              props.onDone('ERRORED', buildSummary('ERRORED'))
             // Paused/Running/Created stay on the Running screen; the
             // titlebar status follows `sessionState`.
             setSessionState(state.toUpperCase() as SessionState)
           }
         }
-        if (typeof ev.round === 'number') setRound(ev.round + 1)
+        if (typeof ev.round === 'number') {
+          const r = ev.round + 1
+          setRound(r)
+          roundRef.current = r
+        }
         if (k === 'heartbeat') {
           const c = (ev as { claude_tokens?: number }).claude_tokens ?? 0
           const x = (ev as { codex_tokens?: number }).codex_tokens ?? 0
           setClaudeTokens(c)
           setCodexTokens(x)
+          claudeTokensRef.current = c
+          codexTokensRef.current = x
         }
         if (k === 'agent_finished') {
           const outcome = String((ev as { outcome?: string }).outcome ?? '')
@@ -113,10 +144,18 @@ export function RunningView(props: {
         if (k === 'note') {
           // The RateLimited reducer branch emits a Note like
           // "codex rate-limited; auto-resume at 2026-04-18T04:08:00Z".
-          // Parse out the RFC3339 timestamp for the countdown pill.
+          // The stagnation detector emits a Note explaining the
+          // history. Parse both, keep the most recent as the terminal
+          // report's "reason" and extract retry_at if present.
           const msg = String((ev as { message?: string }).message ?? '')
           const m = /auto-resume at\s+(\S+)/i.exec(msg)
           if (m) setRetryAt(m[1])
+          // Only remember reasons that describe a terminal-state cause
+          // (rate limit, stagnation, auth fail). Plain PRD-edit notes
+          // shouldn't overwrite the reason.
+          if (/rate.?limit|stagnat|auth|usage limit|retry.after/i.test(msg)) {
+            reasonRef.current = msg
+          }
         }
         if (k === 'goal_check') {
           const agent = String((ev as { agent?: string }).agent ?? '')
@@ -131,8 +170,13 @@ export function RunningView(props: {
             shelved: (ev as { shelved?: string[] }).shelved ?? [],
             rationale: String((ev as { rationale?: string }).rationale ?? ''),
           }
-          if (agent === 'claude') setClaudeGc(snap)
-          else if (agent === 'codex') setCodexGc(snap)
+          if (agent === 'claude') {
+            setClaudeGc(snap)
+            claudeGcRef.current = snap
+          } else if (agent === 'codex') {
+            setCodexGc(snap)
+            codexGcRef.current = snap
+          }
         }
       })
     })()
@@ -141,6 +185,28 @@ export function RunningView(props: {
       if (unsubscribe) unsubscribe()
     }
   }, [props])
+
+  // Keep elapsed ref in sync with the 1Hz tick so the terminal-state
+  // summary reports the correct wall-clock duration.
+  useEffect(() => {
+    elapsedRef.current = elapsed
+  }, [elapsed])
+
+  // Builds a SessionSummary from the refs at the moment of terminal
+  // transition — closure-safe because refs always hold current values.
+  function buildSummary(finalState: SessionState): SessionSummary {
+    return {
+      finalState,
+      reason: reasonRef.current,
+      elapsedSecs: elapsedRef.current,
+      round: roundRef.current,
+      claudeTokens: claudeTokensRef.current,
+      codexTokens: codexTokensRef.current,
+      claudeGc: claudeGcRef.current,
+      codexGc: codexGcRef.current,
+      events: eventsRef.current,
+    }
+  }
 
   useEffect(() => {
     let alive = true

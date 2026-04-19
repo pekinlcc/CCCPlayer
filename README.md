@@ -18,6 +18,28 @@
 
 ## English
 
+### What's new in v1.4.1 (2026-04-19)
+
+- **Fixed a stagnation-detector false positive** that killed the
+  v1.4.0 test session at round 6. The detector used to push one entry
+  per `GoalCheckResult`, so a two-agent disagreement (Claude=0 /
+  Codex=3 repeating) produced an `[0,3,0,3,…]` sequence that trips the
+  "not strictly decreasing for 3 rounds" guard. Now the reducer waits
+  for both agents per round and pushes a single `max(claude,codex)`
+  entry.
+- **Tightened the shelved-item contract.** Goal-check is strictly
+  read-only — `shelved[]` must mirror PRD's `## Shelved
+  disagreements` section verbatim, not be invented mid-phase.
+  Refining has a mandatory grep check: if it marks anything
+  `status: shelved`, PRD's `## Shelved disagreements` section must
+  contain a matching entry by turn end.
+- **New end-of-session report on the terminal screen** (DONE /
+  STOPPED / ERRORED) showing duration, rounds, per-agent tokens, both
+  agents' final goal checks side by side (done / missing / shelved /
+  rationale), a plain-English reason (stagnation, rate-limit, etc.),
+  a chronological highlights timeline, and links to the artifacts
+  directory.
+
 ### What's new in v1.4.0 (2026-04-18)
 
 Philosophical overhaul of the agent prompts. `GOAL.md` is now the only
@@ -266,6 +288,21 @@ This is a personal project — open a PR or file an Issue on GitHub.
 ---
 
 ## 中文说明
+
+### v1.4.1 新增（2026-04-19）
+
+- **修复停滞检测误判**。v1.4.0 测试 session 在 round 6 被反停滞
+  kill，根因是 `missing_history` 每次 `GoalCheckResult` 推一次——两 agent
+  分歧（Claude=0 / Codex=3 反复）产出 `[0,3,0,3,…]` 序列，满足"连续 3
+  轮未严格递减"触发停滞。改为双方都报完一轮后只推一次 `max(claude, codex)`。
+- **收紧 shelved 合同**。goal-check 严格只读，`shelved[]` 必须照抄 PRD
+  的 `## Shelved disagreements` 节，不能现场发明；refining 加强制
+  grep check——标了 `status: shelved` 就必须在 PRD 里写对应条目，否则算
+  本轮未完成。
+- **结束界面新增执行报告**（DONE / STOPPED / ERRORED）。展示时长、轮数、
+  两 agent 各自 token、双栏显示最终 goal check 分歧（done / missing /
+  shelved / rationale），plain 英文 reason（stagnation / rate-limit 等），
+  按时间轴的高亮事件列表，以及 artifacts 路径。
 
 ### v1.4.0 新增（2026-04-18）
 
