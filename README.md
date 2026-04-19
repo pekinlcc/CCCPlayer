@@ -6,7 +6,7 @@
 > walks away until the work is done. · 让两个 AI coding agent 接管本地目录，
 > 按一次 Play 之后就别管了。
 
-![CCCPlayer idle screen](docs/screenshots/idle.jpeg)
+![CCCPlayer idle screen](docs/screenshots/idle.png)
 
 ---
 
@@ -143,8 +143,12 @@ developer cannot be verified". Three ways to get past it:
    - Right pane: raw stdout/stderr from both CLIs, ring-buffered to 2000 lines.
 7. **You can close the window and walk away.** Close ≠ quit — the session
    keeps running in the background. Use Cmd+Q to actually exit (it'll confirm).
-8. When done: a result banner replaces the Progress panel with two buttons —
-   **New session (same folder)** or **← Back to start**.
+8. When done: the Progress panel is replaced by a full Session Report —
+   duration, rounds, per-agent tokens, both agents' final goal checks side
+   by side, a chronological highlights timeline, and artifact paths. Two
+   buttons: **New session (same folder)** or **← Back to start**.
+
+    ![CCCPlayer session report](docs/screenshots/result.jpeg)
 
 ### What lives in your workdir
 
@@ -342,7 +346,7 @@ Program（$99/年）。别人首次下载打开会被 macOS 拦「无法打开�
 
 1. **双击打开 CCCPlayer.app**。初始化界面如下，右上角显示 `◇ NO SESSION`：
 
-    ![初始化界面](docs/screenshots/idle.jpeg)
+    ![初始化界面](docs/screenshots/idle.png)
 
 2. **FOLDER** 填工作目录（随便挑一个本地项目路径，已有代码或空目录都行——
    CCCPlayer 会先盘点现状再在上面增量，不会清空）。禁止家目录 `~` 或系统路径。
@@ -365,8 +369,13 @@ Program（$99/年）。别人首次下载打开会被 macOS 拦「无法打开�
    - 右栏 Raw stream 是两个 CLI 的原始 stdout/stderr，环形缓冲 2000 行。
 
 6. **可以关窗走人**。关窗 ≠ 退出——进程继续在后台跑。真要退出请 Cmd+Q（会弹确认）。
-7. 结束时（DONE / STOPPED / ERRORED）Progress 面板会替换为结果横幅，两个按钮：
-   **New session (same folder)** 保留目录重开、**← Back to start** 清空重来。
+7. 结束时（DONE / STOPPED / ERRORED）Progress 面板会替换为完整的
+   **Session Report**——展示时长、轮数、两 agent 各自 token、双栏最终
+   goal check、按时间轴的 HIGHLIGHTS 事件列表、以及 artifacts 路径。
+   下方两个按钮：**New session (same folder)** 保留目录重开、
+   **← Back to start** 清空重来。
+
+    ![结束界面结果报告](docs/screenshots/result.jpeg)
 
 ### 过程中的产物
 
