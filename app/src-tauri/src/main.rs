@@ -67,6 +67,12 @@ mod commands;
 /// Prepend well-known CLI installation directories to the process `PATH`.
 /// See the caller for the rationale (Finder-launched .app bundles get a
 /// minimal default PATH that breaks `#!/usr/bin/env node` shebang scripts).
+///
+/// v1.5.0+: also dynamically scan version-managed node dirs (nvm / fnm /
+/// n) and asdf shims. The login-shell probe in `preflight::find_cli`
+/// handles CLI discovery for these, but we still need `node` reachable
+/// via PATH so `#!/usr/bin/env node` shebang resolution works when
+/// spawning the CLI later.
 fn augment_path() {
     use std::path::PathBuf;
 
@@ -81,6 +87,41 @@ fn augment_path() {
         parts.push(home.join(".cargo/bin"));
         parts.push(home.join(".volta/bin"));
         parts.push(home.join(".bun/bin"));
+
+        // nvm: ~/.nvm/versions/node/vX.Y.Z/bin
+        let nvm_root = home.join(".nvm/versions/node");
+        if let Ok(entries) = std::fs::read_dir(&nvm_root) {
+            for e in entries.flatten() {
+                let bin = e.path().join("bin");
+                if bin.is_dir() {
+                    parts.push(bin);
+                }
+            }
+        }
+
+        // fnm: ~/.local/share/fnm/node-versions/vX.Y.Z/installation/bin
+        let fnm_root = home.join(".local/share/fnm/node-versions");
+        if let Ok(entries) = std::fs::read_dir(&fnm_root) {
+            for e in entries.flatten() {
+                let bin = e.path().join("installation/bin");
+                if bin.is_dir() {
+                    parts.push(bin);
+                }
+            }
+        }
+
+        // asdf: ~/.asdf/shims (one dir, contains shims for every tool)
+        let asdf_shims = home.join(".asdf/shims");
+        if asdf_shims.is_dir() {
+            parts.push(asdf_shims);
+        }
+
+        // n (tj/n): /usr/local is default but some users set N_PREFIX
+        // under $HOME.
+        let n_bin = home.join("n/bin");
+        if n_bin.is_dir() {
+            parts.push(n_bin);
+        }
     }
     if let Some(p) = std::env::var_os("PATH") {
         for x in std::env::split_paths(&p) {

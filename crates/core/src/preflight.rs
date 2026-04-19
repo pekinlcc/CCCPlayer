@@ -36,7 +36,12 @@ pub struct CliInfo {
 }
 
 /// Find an executable named `name` using [`default_cli_search_paths`] plus an
-/// optional override (from settings).
+/// optional override (from settings). v1.5.0+: if the hardcoded search and
+/// process `PATH` both miss, fall back to asking the user's login +
+/// interactive shell via `$SHELL -l -i -c 'command -v <name>'`. This
+/// catches installs in nvm / fnm / asdf / volta / any shell-rc `export
+/// PATH=…` customization — none of which a Finder-launched `.app`
+/// naturally sees.
 pub fn find_cli(name: &str, override_path: Option<&Path>) -> Option<PathBuf> {
     if let Some(p) = override_path {
         if p.is_file() {
@@ -49,7 +54,116 @@ pub fn find_cli(name: &str, override_path: Option<&Path>) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    None
+    login_shell_which(name)
+}
+
+/// Ask the user's login + interactive shell where a binary named `name`
+/// lives. Runs `$SHELL -l -i -c 'command -v <name>'` with a 5-second
+/// timeout, parses the output, and returns the resolved absolute path
+/// (or `None` on timeout, non-zero exit, alias output, or a non-file
+/// path). Added v1.5.0 to fix CLI-not-on-PATH false negatives for
+/// Finder-launched bundles when the user has installed claude / codex
+/// via a tool manager (nvm, fnm, asdf, volta).
+///
+/// Accepts only `a-zA-Z0-9_.-` in `name` to avoid shell injection; anything
+/// else returns `None` without executing.
+pub fn login_shell_which(name: &str) -> Option<PathBuf> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    // Defense in depth: names must be safe identifiers. Our callers only
+    // pass "claude" / "codex", but this keeps the function reusable.
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return None;
+    }
+
+    let shell_env =
+        std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+    let shell_path = PathBuf::from(&shell_env);
+    if !shell_path.is_file() {
+        return None;
+    }
+
+    // `-l` sources login-only files (.zprofile, .bash_profile, .profile).
+    // `-i` sources interactive files (.zshrc, .bashrc) — nvm / fnm install
+    // hooks typically land there. Combining both is how `iTerm` and other
+    // apps get the user's "real" PATH. stdin null + stderr null so a
+    // chatty rc file doesn't pollute our parse or hang on a prompt.
+    let script = format!("command -v {name} 2>/dev/null");
+    let mut child = Command::new(&shell_path)
+        .args(["-l", "-i", "-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // Poll-and-kill timeout loop. 5s is generous for a cold-start
+    // shell-rc on a slow disk; most invocations return in <500ms.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::warn!(
+                        "login_shell_which({name}) timed out after 5s; \
+                         shell `{shell_env:?}` rc may have a slow init"
+                    );
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_command_v_output(&stdout)
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+}
+
+/// Parse the first line of `command -v <name>` output. Returns the path
+/// on success, `None` for:
+/// - empty / whitespace-only output,
+/// - alias declarations (`command -v` prints `alias foo='…'` for shell
+///   aliases; those aren't spawnable),
+/// - shell function definitions,
+/// - relative paths (can't be trusted out of shell context).
+pub fn parse_command_v_output(stdout: &str) -> Option<String> {
+    let first = stdout.lines().next()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    // `alias foo='bar'` or `foo: aliased to bar` — not a binary.
+    let lower = first.to_ascii_lowercase();
+    if lower.starts_with("alias ")
+        || lower.contains(" aliased to ")
+        || first.contains('=')
+    {
+        return None;
+    }
+    // `foo is a shell builtin` / `foo is a function` — not a binary.
+    if lower.contains(" is a ") || lower.contains(" is an ") {
+        return None;
+    }
+    // Absolute paths only. A relative path in `command -v` output means the
+    // shell found the binary relative to cwd, which won't work in our
+    // context.
+    if !first.starts_with('/') {
+        return None;
+    }
+    Some(first.to_string())
 }
 
 /// Run `<cli> --version` with a short timeout to collect the first line.
@@ -203,5 +317,102 @@ mod tests {
         let cli = dir.path().join("cli");
         let got = probe_auto_approve(&cli, &["--dangerously-skip-permissions", "--yes"]);
         assert_eq!(got, None);
+    }
+
+    // ─── login_shell_which (v1.5.0) ────────────────────────────────────
+
+    #[test]
+    fn parse_command_v_accepts_absolute_path() {
+        let got = parse_command_v_output("/usr/local/bin/claude\n");
+        assert_eq!(got.as_deref(), Some("/usr/local/bin/claude"));
+    }
+
+    #[test]
+    fn parse_command_v_rejects_empty() {
+        assert_eq!(parse_command_v_output(""), None);
+        assert_eq!(parse_command_v_output("\n"), None);
+        assert_eq!(parse_command_v_output("   \n"), None);
+    }
+
+    #[test]
+    fn parse_command_v_rejects_alias_forms() {
+        // bash / zsh print "alias foo='…'".
+        assert_eq!(
+            parse_command_v_output("alias claude='/opt/anthropic/claude'"),
+            None
+        );
+        // zsh's `type` form (seen with some configurations).
+        assert_eq!(
+            parse_command_v_output("claude: aliased to /opt/foo/claude"),
+            None
+        );
+        // An inlined equals sign is a signal too.
+        assert_eq!(
+            parse_command_v_output("CLAUDE_PATH=/opt/x"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_command_v_rejects_builtins_and_functions() {
+        assert_eq!(
+            parse_command_v_output("claude is a shell builtin"),
+            None
+        );
+        assert_eq!(
+            parse_command_v_output("claude is a function"),
+            None
+        );
+        assert_eq!(
+            parse_command_v_output("claude is an alias"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_command_v_rejects_relative_paths() {
+        // Some `command -v` implementations may return a relative path if
+        // the binary was found via a non-absolute PATH entry. Reject.
+        assert_eq!(parse_command_v_output("./bin/claude"), None);
+        assert_eq!(parse_command_v_output("bin/claude"), None);
+        assert_eq!(parse_command_v_output("claude"), None);
+    }
+
+    #[test]
+    fn parse_command_v_takes_first_line_only() {
+        // Noisy shell RC might emit extra lines; we only trust the first.
+        let got = parse_command_v_output("/usr/local/bin/claude\nwarning: weird\n");
+        assert_eq!(got.as_deref(), Some("/usr/local/bin/claude"));
+    }
+
+    #[test]
+    fn login_shell_which_rejects_unsafe_names() {
+        // Defense against shell injection: names must be a safe subset.
+        assert!(login_shell_which("").is_none());
+        assert!(login_shell_which("; rm -rf /").is_none());
+        assert!(login_shell_which("claude && echo x").is_none());
+        assert!(login_shell_which("claude$(whoami)").is_none());
+        assert!(login_shell_which("claude`id`").is_none());
+    }
+
+    #[test]
+    fn login_shell_which_finds_ls() {
+        // Integration smoke test: `/bin/ls` exists on every macOS. If our
+        // login-shell probe works at all, it must find `ls`. If this test
+        // fails, either login_shell_which is broken or the test host's
+        // shell RC is blocking -l -i invocations entirely.
+        let got = login_shell_which("ls");
+        assert!(
+            got.is_some(),
+            "login_shell_which('ls') returned None — check $SHELL rc files for \
+             blocking behavior, or run `$SHELL -l -i -c 'command -v ls'` by \
+             hand to see what's happening"
+        );
+        let path = got.unwrap();
+        assert!(path.is_file(), "resolved path should be a real file: {path:?}");
+        assert!(
+            path.file_name().and_then(|s| s.to_str()) == Some("ls"),
+            "path should end in 'ls': {path:?}"
+        );
     }
 }

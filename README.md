@@ -18,6 +18,21 @@
 
 ## English
 
+### What's new in v1.5.0 (2026-04-19)
+
+Fixes the "CLI Not on PATH" false negative reported by users whose
+`claude` / `codex` are installed via nvm, fnm, asdf, volta, or any
+other node-version manager. When the hardcoded-directory search
+misses, CCCPlayer now runs `$SHELL -l -i -c 'command -v <cli>'`
+(5-second timeout) to ask the user's actual Terminal shell where the
+binary lives. Same rc files as Terminal → same PATH as Terminal.
+
+Also: `augment_path` at startup now dynamically scans
+`~/.nvm/versions/node/*/bin`, `~/.local/share/fnm/node-versions/*/installation/bin`,
+`~/.asdf/shims`, and `~/n/bin` so that `#!/usr/bin/env node` shebang
+scripts (Codex) can find `node` at spawn time even under a version
+manager.
+
 ### What's new in v1.4.1 (2026-04-19)
 
 - **Fixed a stagnation-detector false positive** that killed the
@@ -288,6 +303,26 @@ This is a personal project — open a PR or file an Issue on GitHub.
 ---
 
 ## 中文说明
+
+### v1.5.0 新增（2026-04-19）
+
+修复用户反馈的 "CLAUDE CODE CLI: Not on PATH"
+假阴性——claude / codex 装在 nvm / fnm / asdf / volta 等 node 版本管理器
+下时，Finder 启动的 `.app` 无法看到那些带版本号的路径。
+
+- **登录 shell PATH 探测 fallback**：硬编码目录和进程 PATH 都找不到时，
+  运行 `$SHELL -l -i -c 'command -v <cli>'`（5 秒超时）问用户真实
+  Terminal 的 shell。同一套 rc 文件（`.zprofile` / `.zshrc` /
+  `.bash_profile`）→ 同一个 PATH。用户 Terminal 看得到的，CCCPlayer
+  也看得到。
+- **augment_path 动态扫版本管理器目录**：启动时扫
+  `~/.nvm/versions/node/*/bin`、
+  `~/.local/share/fnm/node-versions/*/installation/bin`、
+  `~/.asdf/shims`、`~/n/bin`，保证 `#!/usr/bin/env node` 的 CLI
+  （Codex）启动时能找到 node。
+- 安全：`login_shell_which` 验证输入名只含 `[a-zA-Z0-9_.-]`，杜绝 shell
+  注入；别名 / shell builtin / 函数 / 相对路径一律拒收，只接受可 spawn
+  的绝对路径。
 
 ### v1.4.1 新增（2026-04-19）
 

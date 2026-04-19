@@ -2,7 +2,7 @@ import type { Event, SessionState, SessionSummary } from '../types'
 import { Meter, PauseIcon, PlayIcon, Shell, StopIcon } from './Shell'
 
 /**
- * End-of-session execution report (v1.4.1+).
+ * End-of-session execution report (v1.5.0+).
  *
  * Replaces the previous minimal terminal screen with a structured
  * recap: duration · rounds · tokens · per-agent final goal-check
@@ -173,7 +173,7 @@ export function TerminalState(props: {
         <span>Workdir</span>
         <code>{props.workdir}</code>
         <span className="spacer" />
-        <span>v1.4.1</span>
+        <span>v1.5.0</span>
       </div>
     </Shell>
   )

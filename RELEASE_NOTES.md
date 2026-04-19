@@ -1,5 +1,72 @@
 # CCCPlayer Release Notes
 
+## v1.5.0 · 2026-04-19
+
+Fixes the "CLAUDE CODE CLI: Not on PATH" false negative reported by
+users whose claude / codex are installed via nvm, fnm, asdf, volta, or
+any other node-version manager that Finder-launched `.app` bundles
+can't naturally see.
+
+### Added
+
+- **Login-shell PATH probe** as a fallback in `preflight::find_cli`.
+  When the hardcoded-directory search and the process PATH both miss,
+  CCCPlayer now runs `$SHELL -l -i -c 'command -v <cli>'` with a 5-
+  second timeout to ask the user's actual Terminal shell where the
+  binary lives. This catches installs hiding under versioned paths
+  like `~/.nvm/versions/node/v20.11.0/bin/claude` that we can't
+  hard-code. Login + interactive mode sources `.zprofile`, `.zshrc`,
+  `.bash_profile`, and `.bashrc` — the same rc files a Terminal
+  window sources — so whatever PATH the user sees in Terminal,
+  CCCPlayer sees too.
+
+### Changed
+
+- **`augment_path` scans version-manager dirs dynamically** on
+  startup. Added:
+  - `~/.nvm/versions/node/*/bin`
+  - `~/.local/share/fnm/node-versions/*/installation/bin`
+  - `~/.asdf/shims`
+  - `~/n/bin`
+
+  These dirs make `node` reachable for `#!/usr/bin/env node` shebang
+  resolution at CLI spawn time, even for users whose node is managed
+  by a version tool. Empty entries are skipped silently.
+
+### Defense in depth
+
+- `login_shell_which` validates its input name against
+  `[a-zA-Z0-9_.-]` before passing it to the shell — no chance of
+  shell injection even though callers only pass "claude" / "codex".
+- Alias declarations, shell builtins, functions, and relative paths
+  returned by `command -v` are rejected — we need a real spawnable
+  absolute path to run `<cli> --version`.
+
+### Tests
+
+- 7 new unit tests cover `parse_command_v_output` edge cases (alias
+  forms, builtins, functions, relative paths, whitespace, multi-line).
+- 1 integration test runs `login_shell_which("ls")` against the host
+  shell to verify the plumbing actually works.
+
+### Not included in this release
+
+- Manual "override CLI path" UI — still want this as a safety net for
+  users whose login shell can't find things. Planned for a future
+  minor if needed.
+- CLI doctor panel showing diagnostic details — also deferred.
+
+### Artifacts
+
+- `dist/CCCPlayer-1.5.0-arm64-install.zip`  (~4.5 MB)  ← recommended
+- `dist/CCCPlayer-1.5.0-arm64.dmg`           (~5.7 MB)
+- `dist/CCCPlayer-1.5.0-arm64.app.tar.gz`    (~4.5 MB)
+
+No schema or runtime-behaviour changes beyond CLI discovery. Existing
+sessions resume cleanly; no event-log changes.
+
+---
+
 ## v1.4.1 · 2026-04-19
 
 Root-cause follow-up to the v1.4.0 test session where the stagnation

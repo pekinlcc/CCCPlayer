@@ -1199,6 +1199,7 @@ next_state rules:
 | 85 | 停滞 / rate-limit 原因同时 emit Note 事件（v1.4.1） | 原来 reducer 的 `NotifyAttention` effect 被 `apply_effects` 丢弃，UI 无法告诉用户「为什么 Errored」。现在同时 push 一个 `EventKind::Note` 到事件流，TerminalState 能读到并在执行报告里显示 reason 行。 | §6.1 |
 | 86 | Shelved 合同强化（v1.4.1） | 实测发现 Claude 的 goal_check 在没有 PRD Shelved 节的情况下自行 shelve 项目，导致 Codex 下一轮 goal_check 继续把它当 missing，误触停滞。修法：goal-check prompt 明确 shelved[] 必须照抄 PRD，不得新增；refining prompt 加 mandatory 尾部 grep check，标 shelved 就必须写到 PRD 否则算未完成。 | §17.3、§17.4 |
 | 87 | TerminalState 执行报告（v1.4.1） | 原来结束屏只有一行 banner。扩成结构化报告：时长 / 轮数 / 双 agent token / 最终 goal check 双栏对比（done/missing/shelved/rationale） / reason（从最近 note 提取） / 按时间轴的高亮事件（state 变化、review verdict、goal_check、错误） / artifacts 路径 / 新 session & 返回起点按钮。`RunningView` 通过 `SessionSummary` 类型把所需数据一次性传给 `TerminalState`，避免 terminal 屏需要自己重订阅事件。 | §6.1 |
+| 88 | 登录 shell PATH 探测（v1.5.0） | 实测反馈：朋友装 CLI 在 nvm 版本目录下（`~/.nvm/versions/node/v20.x/bin/claude`），CCCPlayer 硬编码搜索 + augment_path 都找不到，Preflight 红×。修法：`find_cli` 所有硬编码尝试失败后，最后 fallback 到 `login_shell_which()`——跑 `$SHELL -l -i -c 'command -v <cli>'`（5s 超时），让用户 Terminal 的登录 + 交互 shell 自己解析 PATH。同时 augment_path 动态扫 `~/.nvm/versions/node/*/bin`、`~/.local/share/fnm/node-versions/*/installation/bin`、`~/.asdf/shims`、`~/n/bin`，保证 shebang 脚本启动时也能找到 node。防 shell 注入：`login_shell_which` 输入名校验 `[a-zA-Z0-9_.-]`，别名 / builtin / 函数 / 相对路径一律拒收。 | §2、§16.2 |
 
 ---
 
