@@ -83,13 +83,23 @@ export function RunningView(props: {
   const codexGcRef = useRef<GoalCheckSnapshot | null>(null)
   const reasonRef = useRef<string | null>(null)
 
+  // v1.7.2: freeze both `elapsed` and `nowTick` while the session is
+  // PAUSED. Prior versions ticked unconditionally, so a user returning to
+  // a paused session would see the `T+ h:mm:ss` clock and
+  // `last activity Nm ago` counter still incrementing — making a PAUSED
+  // session look active and live. With the tick gated on sessionState,
+  // both displays freeze at the moment of pause and resume naturally
+  // when the session goes back to RUNNING. `elapsed` becomes "active
+  // time" rather than "wall-clock since mount" — better matches what
+  // users actually want to know.
   useEffect(() => {
+    if (sessionState === 'PAUSED') return
     const t = setInterval(() => {
       setElapsed((e) => e + 1)
       setNowTick((n) => n + 1)
     }, 1000)
     return () => clearInterval(t)
-  }, [])
+  }, [sessionState])
 
   useEffect(() => {
     let alive = true

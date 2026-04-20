@@ -1,5 +1,33 @@
 # CCCPlayer Release Notes
 
+## v1.7.2 · 2026-04-20
+
+UI follow-up to v1.7.1. Now that the stall watcher actually works on
+macOS and rate-limit auto-pauses fire cleanly, PAUSED sessions surface
+far more often — and exposed a long-standing UI bug: the `T+ h:mm:ss`
+elapsed clock and `last activity Nm ago` counter kept incrementing
+even when the session was PAUSED. A paused session looked live.
+
+### Fixed — UI clocks freeze while session is PAUSED
+
+`RunningView.tsx` had a `setInterval` ticking `elapsed` and `nowTick`
+once per second, unconditionally, since v1.1. Gate it on
+`sessionState !== 'PAUSED'` so:
+
+- **Elapsed** freezes at the moment of pause; on resume, it continues
+  counting from where it left off. Becomes "active time" rather than
+  "wall-clock since mount" — matches what users actually want to know.
+- **Last activity Nm ago** also freezes because `nowTick` (the memo's
+  dependency that drives the relative-time recomputation) stops
+  advancing. The memo still re-runs if a genuine event arrives during
+  pause (which moves `lastActivityAt`), so fresh activity still
+  surfaces naturally.
+
+No other behavior changes. One-line guard on the existing effect plus
+a dep-list update.
+
+---
+
 ## v1.7.1 · 2026-04-20
 
 Critical bug fix: the stall watcher has been silently disabled on
