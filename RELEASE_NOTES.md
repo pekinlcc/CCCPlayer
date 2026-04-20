@@ -1,5 +1,59 @@
 # CCCPlayer Release Notes
 
+## v1.6.1 · 2026-04-20
+
+Small UX follow-up on top of v1.6.0's GOAL.md conflict modal.
+
+### Changed — existing GOAL.md pre-loads into the textarea
+
+Before: picking a folder that already had `GOAL.md` gave the user no
+visible signal that one existed — they'd type a new goal blindly and
+only see the conflict modal after hitting Play.
+
+v1.6.1: as soon as the folder is selected (or typed in), CCCPlayer
+reads the existing `GOAL.md` and pre-populates the goal textarea with
+its content. A small hint under the textarea tells you what's going
+on:
+
+- **cyan** "loaded existing GOAL.md — keep to reuse, edit to
+  overwrite" when the textarea still matches the file verbatim.
+- **amber** "diverged from existing GOAL.md — Play will confirm
+  overwrite" once you start typing.
+
+Keeping the pre-loaded content verbatim and hitting Play starts the
+session immediately (the backend sees matching content and skips the
+rewrite). Editing triggers the same three-way modal from v1.6.0.
+
+### Preserves in-progress edits across folder switches
+
+If you've already started typing a goal for folder A and then switch
+to folder B (which also has a GOAL.md), your in-progress goal is left
+alone. The pre-load only replaces the textarea when it's empty or
+still verbatim what was auto-loaded previously — typed content is
+never clobbered without going through the conflict modal.
+
+### Added
+
+- Backend `read_goal_md` Tauri command — returns `Option<String>`
+  for the workdir's `GOAL.md` (None when absent; errors are treated
+  as absence so the UX affordance is non-fatal).
+- `ui/src/api.ts` — `readGoalMd(path): Promise<string | null>`
+  wrapper.
+- Welcome.tsx — 300ms-debounced `useEffect` on workdir change,
+  `autoLoadedGoal` state + stale-closure-safe refs, and the two
+  hint states in `.goal-meta`.
+
+### Engineering notes
+
+- Single-owner state: `autoLoadedGoal` tracks the exact string we
+  pre-populated so the "is the current goal still auto-loaded"
+  comparison is a cheap identity check rather than a fuzzy match.
+- No backend schema changes. `start_session`'s existing conflict
+  path handles the "user edited the pre-loaded content" case without
+  any new machinery.
+
+---
+
 ## v1.6.0 · 2026-04-20
 
 Two substantive behaviour changes — one that fixes a quiet data-loss

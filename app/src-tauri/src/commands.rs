@@ -53,6 +53,22 @@ pub fn classify_workdir(path: String) -> Result<ClassifyResp, String> {
     })
 }
 
+/// v1.6.1 UX: on workdir selection the UI pre-loads the existing `GOAL.md`
+/// so the user can see the current goal and either keep it verbatim or edit
+/// on top of it. Returns `None` when the file is absent; on read failure we
+/// surface the error so the UI can show a small warning instead of silently
+/// blanking the goal field.
+#[tauri::command]
+pub fn read_goal_md(path: String) -> Result<Option<String>, String> {
+    let goal_path = PathBuf::from(&path).join("GOAL.md");
+    if !goal_path.exists() {
+        return Ok(None);
+    }
+    std::fs::read_to_string(&goal_path)
+        .map(Some)
+        .map_err(|e| format!("{e}"))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StartReq {
     pub goal: String,

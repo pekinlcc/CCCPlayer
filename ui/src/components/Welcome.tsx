@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   classifyWorkdir,
   GoalConflictError,
   pickFolder,
+  readGoalMd,
   runPreflight,
   startSession,
 } from '../api'
@@ -23,6 +24,19 @@ export function Welcome(props: {
   const [safety, setSafety] = useState<SafetyVerdict | null>(null)
   const [starting, setStarting] = useState(false)
   const [goalConflict, setGoalConflict] = useState<{ existing: string } | null>(null)
+  /**
+   * v1.6.1: when the workdir has an existing `GOAL.md`, we pre-populate the
+   * goal textarea with its content. `autoLoadedGoal` remembers what we
+   * loaded so we can tell whether the current `goal` is "still verbatim
+   * what we loaded" (safe to replace on a new workdir pick) vs. "the user
+   * has typed on top of it" (leave it alone — the Play-time conflict
+   * modal will catch the mismatch).
+   */
+  const [autoLoadedGoal, setAutoLoadedGoal] = useState<string | null>(null)
+  // Stale-closure guards — the workdir-driven effect reads current goal /
+  // autoLoadedGoal without re-running when they change.
+  const goalRef = useRef(goal)
+  const autoLoadedRef = useRef(autoLoadedGoal)
 
   useEffect(() => {
     void runPreflight().then(setPreflight)
@@ -40,6 +54,54 @@ export function Welcome(props: {
       void classifyWorkdir(path).then((r) => setSafety(r.verdict))
     }, 300)
     return () => clearTimeout(t)
+  }, [workdir])
+
+  // Sync refs so the workdir-change effect reads current values without
+  // being in its dep list (we don't want it to re-fire on every keystroke).
+  useEffect(() => {
+    goalRef.current = goal
+  }, [goal])
+  useEffect(() => {
+    autoLoadedRef.current = autoLoadedGoal
+  }, [autoLoadedGoal])
+
+  // v1.6.1 auto-load: when the user picks / types a workdir whose
+  // `GOAL.md` already exists, pre-populate the textarea with its content
+  // so they can see the current goal and either keep it verbatim (reuse)
+  // or edit on top of it (Play-time modal will then surface the mismatch).
+  // Preserves an in-progress user edit across workdir switches — we only
+  // replace the textarea content when it's empty or still matches what
+  // we previously auto-loaded (i.e. the user hasn't diverged).
+  useEffect(() => {
+    const path = workdir.trim()
+    if (!path) {
+      setAutoLoadedGoal(null)
+      return
+    }
+    let cancelled = false
+    const t = setTimeout(() => {
+      void readGoalMd(path).then((content) => {
+        if (cancelled) return
+        const curGoal = goalRef.current
+        const curAuto = autoLoadedRef.current
+        if (content == null) {
+          // No GOAL.md: clear only if current content was auto-loaded.
+          if (curAuto !== null && curGoal === curAuto) setGoal('')
+          setAutoLoadedGoal(null)
+          return
+        }
+        // GOAL.md exists: replace only if textarea is empty or current
+        // content is verbatim what we previously auto-loaded.
+        if (curGoal.trim() === '' || curGoal === curAuto) {
+          setGoal(content)
+          setAutoLoadedGoal(content)
+        }
+      })
+    }, 300)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
   }, [workdir])
 
   const claudeOk = preflight?.claude?.supports_auto_approve === true
@@ -145,6 +207,16 @@ export function Welcome(props: {
           {!goalCheck.ok && goal.length > 0 && (
             <span className="warn">· {goalCheck.reason}</span>
           )}
+          {autoLoadedGoal !== null && goal === autoLoadedGoal && goal.length > 0 && (
+            <span className="loaded">
+              · loaded existing GOAL.md — keep to reuse, edit to overwrite
+            </span>
+          )}
+          {autoLoadedGoal !== null && goal !== autoLoadedGoal && goal.length > 0 && (
+            <span className="diverged">
+              · diverged from existing GOAL.md — Play will confirm overwrite
+            </span>
+          )}
         </div>
 
         <ul className="preflight-list">
@@ -223,7 +295,7 @@ export function Welcome(props: {
         <span>Workdir</span>
         <code>{workdir.trim() || '—'}</code>
         <span className="spacer" />
-        <span>v1.6.0</span>
+        <span>v1.6.1</span>
       </div>
       {goalConflict && (
         <GoalConflictModal

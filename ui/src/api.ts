@@ -50,6 +50,24 @@ export async function classifyWorkdir(path: string): Promise<ClassifyResp> {
 }
 
 /**
+ * v1.6.1: reads the existing `GOAL.md` in the workdir (if any), returning
+ * `null` when the file is absent. Used by `Welcome.tsx` to pre-populate the
+ * goal textarea so users can see and edit the existing immutable benchmark
+ * before starting a session.
+ */
+export async function readGoalMd(path: string): Promise<string | null> {
+  const fn = await invoke()
+  try {
+    const result = await fn<string | null>('read_goal_md', { path })
+    return result ?? null
+  } catch {
+    // File-read errors are non-fatal for this UX affordance — fall back to
+    // "no existing goal" and let the conflict modal pick up any mismatch.
+    return null
+  }
+}
+
+/**
  * Thrown when the workdir already has a `GOAL.md` whose content differs from
  * what the user typed, and `overwriteGoal` was not set. The UI should show a
  * three-way modal (use existing / overwrite / cancel) and re-invoke

@@ -280,6 +280,8 @@ html, body, #root {
   color: var(--dim);
 }
 .goal-meta .warn { color: var(--danger); }
+.goal-meta .loaded { color: var(--cyan); }
+.goal-meta .diverged { color: var(--amber); }
 
 /* preflight rows */
 .preflight-list {

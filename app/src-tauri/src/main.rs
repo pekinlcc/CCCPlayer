@@ -31,6 +31,7 @@ fn main() {
             .invoke_handler(tauri::generate_handler![
                 crate::commands::preflight,
                 crate::commands::classify_workdir,
+                crate::commands::read_goal_md,
                 crate::commands::start_session,
                 crate::commands::pause_session,
                 crate::commands::stop_session,
