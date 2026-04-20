@@ -4,9 +4,15 @@ any command that mutates state beyond reads.
 Read:
 
 1. `GOAL.md`.
-2. `PRD.md`, if present. Note the `## Shelved disagreements` section if
-   one exists — those items are out of scope for "missing" (both agents
-   have already agreed to disagree on them and ship around them).
+2. `PRD.md`, if present. Note TWO sections in particular:
+   - `## Hard deliverables` — non-shelvable required outputs (files,
+     commands, end-to-end behaviors) the user's goal treats as
+     ship-criteria. These items **cannot be satisfied by shelving**;
+     if any of them is not produced, `done` MUST be `false`.
+   - `## Shelved disagreements` — genuine design disagreements both
+     agents agreed to ship around. These are out of scope for
+     "missing" *unless* one of them substantially refers to a hard
+     deliverable (protocol violation; see v1.7 rule below).
 3. The highest-numbered `codex_review_v*.md`, if any, including its
    `## Claude Code 回应` section.
 4. The working tree file list and a concise summary of recent changes.
@@ -32,6 +38,29 @@ Output exactly one fenced JSON block and nothing else outside it:
                    explicitly so the user can see the trade-offs>"
     }
     ```
+
+IMPORTANT rules for the `done` field (v1.7):
+
+- Before answering `done: true`, **walk through `## Hard deliverables`
+  item by item**. For each hard deliverable, verify:
+    (a) the required file / command / behavior is actually present
+        and working in the current tree, OR
+    (b) it is concretely recorded as accepted / partial in the latest
+        review's response section with the delivered partial visible
+        in the tree.
+  If neither (a) nor (b) holds for any hard deliverable, `done` MUST
+  be `false` — regardless of what the latest review says, regardless
+  of shelved items, regardless of how "productive" the loop has been.
+- You MAY NOT justify `done: true` with language like "the user can
+  produce X themselves by running Y" for a hard deliverable. If X is
+  listed as hard, it has to actually exist in the tree OR be an
+  accepted partial with the remaining gap owned in PRD.
+- The orchestrator runs an independent hard-deliverable gate after
+  your answer: if any item in `missing[]` or `shelved[]` shares any
+  distinguishing token (content word, stop-words filtered) with a
+  hard deliverable, `done=true` is overridden to `done=false`
+  automatically and a `Note` event explains why. Claiming done while
+  the gate can still fire wastes a round — tell the truth here.
 
 IMPORTANT rules for the `shelved` field (v1.4.1):
 

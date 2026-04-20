@@ -173,7 +173,7 @@ export function TerminalState(props: {
         <span>Workdir</span>
         <code>{props.workdir}</code>
         <span className="spacer" />
-        <span>v1.6.1</span>
+        <span>v1.7.0</span>
       </div>
     </Shell>
   )

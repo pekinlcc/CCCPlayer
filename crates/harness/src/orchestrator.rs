@@ -22,7 +22,8 @@ use cccplayer_core::state::{Phase, SessionState, Verdict};
 use tokio::sync::{mpsc, watch};
 
 use crate::parsers::{
-    extract_claude_text, parse_goal_check, parse_review, parse_round_attempts,
+    extract_claude_text, parse_goal_check, parse_hard_deliverables, parse_review,
+    parse_round_attempts,
 };
 use crate::runner::{parse_codex_total_tokens, HarnessRunner, StreamEvent, TurnInput};
 
@@ -323,7 +324,24 @@ impl Orchestrator {
                 let codex_gc = parse_goal_check(&codex_res.stdout_tail);
                 self.handle_turn_result(claude_res, events_tx).await?;
                 self.handle_turn_result(codex_res, events_tx).await?;
+                // v1.7 hard-deliverable gate: before feeding the agents'
+                // goal-check results into the reducer, run an independent
+                // check against PRD.md's `## Hard deliverables`. If any
+                // shelved/missing item substantially names a hard
+                // deliverable, force `done=false` and prepend a gate
+                // message to the rationale. Emits a Note event so the
+                // session report shows why DONE was overridden. See
+                // prompts/goal-check.md for the user-facing contract and
+                // `cccplayer_core::jaccard::match_any_deliverable` for the
+                // matching algorithm.
+                let hard_deliverables = read_hard_deliverables(self.session.workdir());
                 if let Some(g) = claude_gc {
+                    let g = self.hard_deliverable_gate(
+                        Agent::Claude,
+                        g,
+                        &hard_deliverables,
+                        events_tx,
+                    );
                     let effs = self.reducer.handle(StateCommand::GoalCheckResult {
                         agent: Agent::Claude,
                         done: g.done,
@@ -335,6 +353,12 @@ impl Orchestrator {
                     self.apply_effects(effs, events_tx).await?;
                 }
                 if let Some(g) = codex_gc {
+                    let g = self.hard_deliverable_gate(
+                        Agent::Codex,
+                        g,
+                        &hard_deliverables,
+                        events_tx,
+                    );
                     let effs = self.reducer.handle(StateCommand::GoalCheckResult {
                         agent: Agent::Codex,
                         done: g.done,
@@ -732,6 +756,97 @@ impl Orchestrator {
         }
         save_session_meta(&self.session, self.reducer.meta())?;
         Ok(())
+    }
+}
+
+/// Read the `## Hard deliverables` list from the workdir's `PRD.md`.
+/// Returns an empty Vec when PRD is absent, unreadable, or the section is
+/// not present / holds only the v1.7 sentinel line. See
+/// `parsers::parse_hard_deliverables` for tokenization behavior.
+fn read_hard_deliverables(workdir: &Path) -> Vec<String> {
+    let prd_path = workdir.join("PRD.md");
+    let Ok(body) = std::fs::read_to_string(&prd_path) else {
+        return Vec::new();
+    };
+    parse_hard_deliverables(&body)
+}
+
+impl Orchestrator {
+    /// v1.7 hard-deliverable gate. Given an agent's goal-check output,
+    /// cross-checks its `shelved[]` and `missing[]` lists against the PRD's
+    /// `## Hard deliverables` section. If any list item shares a
+    /// distinguishing token with a hard deliverable, force `done=false`
+    /// and prepend a gate-explanation to the rationale. Emits a `Note`
+    /// event describing the override so the session report can surface
+    /// it. When the deliverables list is empty (absent section or
+    /// sentinel-only), the gate is a no-op.
+    ///
+    /// Deliberately strict: prefer a false-positive override (costs one
+    /// extra round) to a false-negative silent DONE on a real deliverable
+    /// gap — that's the failure mode this gate exists to prevent.
+    fn hard_deliverable_gate(
+        &self,
+        agent: Agent,
+        mut g: crate::parsers::GoalCheckOutput,
+        hard_deliverables: &[String],
+        events_tx: &mpsc::UnboundedSender<Event>,
+    ) -> crate::parsers::GoalCheckOutput {
+        if !g.done || hard_deliverables.is_empty() {
+            return g;
+        }
+        use cccplayer_core::jaccard::match_any_deliverable;
+        // Collect (item_text, which-list, matched-deliverable-index) for all
+        // hits, so the override message can quote specifics.
+        let mut hits: Vec<(String, &'static str, &str)> = Vec::new();
+        for item in &g.missing {
+            if let Some(idx) = match_any_deliverable(item, hard_deliverables) {
+                hits.push((item.clone(), "missing", hard_deliverables[idx].as_str()));
+            }
+        }
+        for item in &g.shelved {
+            if let Some(idx) = match_any_deliverable(item, hard_deliverables) {
+                hits.push((item.clone(), "shelved", hard_deliverables[idx].as_str()));
+            }
+        }
+        if hits.is_empty() {
+            return g;
+        }
+        let agent_name = match agent {
+            Agent::Claude => "claude",
+            Agent::Codex => "codex",
+        };
+        let quoted_hits: Vec<String> = hits
+            .iter()
+            .map(|(item, list, deliv)| {
+                format!("'{item}' (in {list}[]) ↔ '{deliv}' (hard deliverable)")
+            })
+            .collect();
+        let gate_msg = format!(
+            "[v1.7 hard-deliverable gate] {agent_name} claimed done=true but \
+             {n} item(s) in missing[]/shelved[] substantially match hard \
+             deliverables recorded in PRD.md's `## Hard deliverables` \
+             section. Overriding to done=false so the loop continues. \
+             Matches: {matches}. To genuinely finish: produce the \
+             missing artifacts or update PRD's `## Hard deliverables` \
+             via Changelog if GOAL.md was reinterpreted.",
+            n = hits.len(),
+            matches = quoted_hits.join("; "),
+        );
+        g.done = false;
+        g.rationale = if g.rationale.is_empty() {
+            gate_msg.clone()
+        } else {
+            format!("{gate_msg}\n\n(Original rationale: {})", g.rationale)
+        };
+        let ev = Event::new(
+            self.reducer.meta().round,
+            EventKind::Note {
+                message: gate_msg,
+            },
+        );
+        let _ = append_event(&self.session, &ev);
+        let _ = events_tx.send(ev);
+        g
     }
 }
 

@@ -68,20 +68,63 @@ Required top-level headings (in order):
                          stay visible as:
                              - [~] M3: <original title>
                                    superseded by M3b: <reason, 1 line>
-8. **Shelved disagreements** — items Claude and Codex have agreed to
+8. **Hard deliverables** — non-shelvable required outputs of the
+                         session, extracted from `GOAL.md`. See
+                         "Hard deliverables rules" below; this section
+                         MUST have at least one item or reviewing will
+                         flag it as blocking.
+9. **Shelved disagreements** — items Claude and Codex have agreed to
                          disagree on (see session rules in common
                          prompt). Preserve existing entries verbatim.
                          Empty list is fine when no disagreement has
                          been shelved yet.
-9. **Changelog**       — PRD evolution history. Append a one-line
+10. **Changelog**      — PRD evolution history. Append a one-line
                          entry every time you revise the document in a
                          later turn:
                              - round N: <what changed, why, sub-goal link>
                          This is the audit trail; it lets a later
                          reviewer see *why* the PRD drifted, not just
                          the final state. Empty on first write.
-10. **Open Questions** — anything you could not decide; empty list is
+11. **Open Questions** — anything you could not decide; empty list is
                          fine.
+
+## Hard deliverables rules
+
+A hard deliverable is a **concrete, externally-observable thing the
+user's goal text treats as required output**. Examples:
+
+- A specific file exists on disk at a specific path
+  (e.g. "a bootable ISO at build/output/hermes-linux.iso")
+- A specific command succeeds when the user runs it
+  (e.g. "`make iso` produces a runnable ISO")
+- A specific end-to-end behavior is observable
+  (e.g. "the app launches and displays the main window")
+- A specific API / UI / interaction the goal explicitly names
+
+A hard deliverable is NOT:
+
+- An abstract quality ("clean code", "well tested", "fast")
+- An implementation step ("use Tauri", "add a state machine")
+- A sub-goal that's only a means to an end
+
+**Write `## Hard deliverables` as a bulleted list, each item a single
+line naming ONE deliverable in user-observable terms.** Prefer the
+user's own phrasing from `GOAL.md` — if `GOAL.md` says "Linux
+distribution ISO", write "Linux distribution ISO file produced by the
+build pipeline", not "Debian-based live CD image".
+
+If `GOAL.md` genuinely has no concrete artifact (e.g. "refactor this
+module to be more readable" — no observable output), write one line
+explaining why there are no hard deliverables and list ONE
+sentinel: `- no concrete artifact required per GOAL.md`. Reviewing
+will accept that sentinel as valid; it's the empty section that fails.
+
+Once written, the `## Hard deliverables` list is **append-only**
+across rounds — never remove an entry. You may clarify wording via
+Changelog, but an item once written cannot be silently dropped. The
+orchestrator uses this list as a hard gate: at goal-check time, if
+any hard deliverable substantially matches an item in the agents'
+`missing[]` or `shelved[]`, `done=true` is rejected.
 
 ## Step 3 — Self-adversarial check (MANDATORY before saving)
 

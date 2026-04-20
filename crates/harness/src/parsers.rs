@@ -315,6 +315,69 @@ fn parse_bullet_lists(section: &str) -> (Vec<String>, Vec<String>) {
     (blocking, non_blocking)
 }
 
+/// Extract the items in `PRD.md`'s `## Hard deliverables` section.
+///
+/// v1.7 contract: PLANNING writes this section with one bullet per
+/// non-shelvable required output extracted from `GOAL.md`. The v1.7
+/// hard-deliverable gate reads these entries at goal-check time and blocks
+/// `done=true` if any shelved/missing item substantially refers to one.
+///
+/// Tolerant of:
+/// - numbered section headings (`## 8. Hard deliverables`);
+/// - heading variants ("hard-deliverables", "Hard Deliverables");
+/// - various bullet prefixes (`-`, `*`, `•`);
+/// - section ending on a blank line followed by the next `##` heading OR
+///   EOF.
+///
+/// Skips the sentinel line `no concrete artifact required per GOAL.md` —
+/// that's planning's explicit opt-out for abstract goals, and returning it
+/// as a "deliverable" would cause the gate to misfire (every item would
+/// match on the word "artifact" or "required").
+///
+/// Returns an empty Vec when the section is absent or contains only the
+/// sentinel. Callers distinguish "section present but effectively empty"
+/// from "section absent" via [`has_hard_deliverables_section`].
+pub fn parse_hard_deliverables(markdown: &str) -> Vec<String> {
+    let Some(section) = find_section(markdown, "hard deliverables") else {
+        return Vec::new();
+    };
+    let bullet = Regex::new(r"(?m)^\s*[-*•]\s+(.+?)\s*$").unwrap();
+    bullet
+        .captures_iter(section)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            // Sentinel for abstract goals — explicitly opt out of the gate.
+            !s.eq_ignore_ascii_case("no concrete artifact required per GOAL.md")
+        })
+        .collect()
+}
+
+/// Does the PRD have a `## Hard deliverables` heading at all? REVIEWING
+/// uses this to gate: if absent, it's a blocking finding.
+pub fn has_hard_deliverables_section(markdown: &str) -> bool {
+    find_section(markdown, "hard deliverables").is_some()
+}
+
+/// Slice `markdown` from the named `## <heading>` line (case-insensitive,
+/// tolerates numbered prefixes) up to the next `## ` heading or EOF.
+/// Returns `None` when the heading is absent.
+fn find_section<'a>(markdown: &'a str, heading_lower: &str) -> Option<&'a str> {
+    let head_re = Regex::new(&format!(
+        r"(?mi)^##\s*(?:\d+\.\s*)?{}\s*$",
+        regex::escape(heading_lower)
+    ))
+    .ok()?;
+    let head = head_re.find(markdown)?;
+    let after = &markdown[head.end()..];
+    // Next `## ` heading (any heading) terminates this section.
+    let next_head = Regex::new(r"(?m)^##\s+").ok()?;
+    match next_head.find(after) {
+        Some(m) => Some(&after[..m.start()]),
+        None => Some(after),
+    }
+}
+
 /// Required top-level headings for a well-formed `PRD.md`. See §17.1.
 pub const REQUIRED_PRD_HEADINGS: &[&str] = &[
     "Goal",
@@ -585,5 +648,93 @@ mod tests {
         let r = parse_round_attempts(md);
         assert!(r.codex_tried_new_angle);
         assert!(!r.claude_tried_new_angle);
+    }
+
+    // ----- v1.7 hard-deliverables parser ----------------------------------
+
+    #[test]
+    fn hard_deliverables_absent_returns_empty() {
+        let prd = "# PRD\n## Goal\nx\n## Scope\n-";
+        assert!(parse_hard_deliverables(prd).is_empty());
+        assert!(!has_hard_deliverables_section(prd));
+    }
+
+    #[test]
+    fn hard_deliverables_extracts_bullets() {
+        let prd = r#"# PRD
+## Goal
+Make a Linux ISO
+
+## Hard deliverables
+- Linux distribution ISO file produced by the build pipeline
+- Hermes Agent configuration wizard boots on first login
+- `make iso` succeeds on Docker host
+
+## Shelved disagreements
+"#;
+        let items = parse_hard_deliverables(prd);
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[0],
+            "Linux distribution ISO file produced by the build pipeline"
+        );
+        assert!(items[2].contains("make iso"));
+        assert!(has_hard_deliverables_section(prd));
+    }
+
+    #[test]
+    fn hard_deliverables_tolerates_numbered_heading() {
+        let prd = r#"# PRD
+## 8. Hard deliverables
+- Item A
+- Item B
+## 9. Shelved disagreements
+"#;
+        assert_eq!(parse_hard_deliverables(prd).len(), 2);
+    }
+
+    #[test]
+    fn hard_deliverables_tolerates_alternate_bullets() {
+        let prd = "## Hard deliverables\n* item one\n• item two\n- item three\n";
+        let items = parse_hard_deliverables(prd);
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn hard_deliverables_skips_sentinel() {
+        let prd = r#"## Hard deliverables
+- no concrete artifact required per GOAL.md
+"#;
+        assert!(parse_hard_deliverables(prd).is_empty());
+        // Section IS present even though its only bullet is the sentinel —
+        // that's the explicit "abstract goal" opt-out, and reviewing should
+        // NOT flag it as missing.
+        assert!(has_hard_deliverables_section(prd));
+    }
+
+    #[test]
+    fn hard_deliverables_ends_at_next_section() {
+        let prd = r#"## Hard deliverables
+- item A
+- item B
+
+## Milestones
+- M1: do the thing — not a hard deliverable, must not appear
+"#;
+        let items = parse_hard_deliverables(prd);
+        assert_eq!(items.len(), 2);
+        assert!(!items.iter().any(|s| s.contains("M1")));
+    }
+
+    #[test]
+    fn hard_deliverables_section_at_EOF() {
+        let prd = "## Hard deliverables\n- item A\n- item B\n";
+        assert_eq!(parse_hard_deliverables(prd).len(), 2);
+    }
+
+    #[test]
+    fn hard_deliverables_case_insensitive_heading() {
+        let prd = "## HARD DELIVERABLES\n- item A\n";
+        assert_eq!(parse_hard_deliverables(prd).len(), 1);
     }
 }

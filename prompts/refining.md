@@ -34,6 +34,20 @@ set for this turn.
                 `## Shelved disagreements` section and note it here.
                 Shelving declares "we agree to disagree"; Codex will
                 confirm or refuse in the next review.
+                **MANDATORY BEFORE SHELVE: grep PRD.md's
+                `## Hard deliverables` section.** If the item you're
+                about to shelve names or substantially refers to a
+                hard deliverable — a concrete required output the
+                user's GOAL.md treats as ship-criteria — you MAY NOT
+                shelve it. Shelve is for genuine design disagreements
+                ("flat vs nested config keys", "Result vs exceptions"),
+                not for hard-deliverable gaps. Hard-deliverable gaps
+                must be resolved as `accepted` (actual delivery) or
+                `partial` (the partial you produced, with the
+                remaining gap explicitly named and owned). Attempting
+                to shelve a hard deliverable will be caught by the
+                orchestrator's goal-check gate and the session will
+                NOT be marked DONE — you've merely wasted a round.
 - **stale**   : the item refers to a milestone or design decision that
                 has since been superseded in `PRD.md`'s Changelog.
                 Cite the Changelog entry and skip.

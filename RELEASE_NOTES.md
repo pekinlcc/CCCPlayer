@@ -1,5 +1,128 @@
 # CCCPlayer Release Notes
 
+## v1.7.0 · 2026-04-20
+
+Fixes a different-shape failure the v1.6 Hermes Linux session made
+visible: both agents can **agree** to shelve a core deliverable, then
+declare `done=true`, and the loop ends as DONE even though the
+user's goal was never actually produced. This is not stagnation — the
+loop is "productive" in the v1.6 sense; it's consensus rationalization.
+
+### Changed — Hard deliverables gate (Part A v2)
+
+`PRD.md` gains a new required section: `## Hard deliverables`. PLANNING
+writes it from `GOAL.md` during the first planning turn, with one
+bullet per concrete, externally-observable required output (files,
+commands, end-to-end behaviors). Items once written are **append-only**
+across rounds.
+
+Three layers of enforcement sit on top of it:
+
+1. **REFINING — no shelving a hard deliverable.** Before marking any
+   item `status: shelved`, Claude must grep `## Hard deliverables`.
+   If the shelve candidate substantially names a hard deliverable,
+   shelve is forbidden — the gap must be resolved as `accepted`
+   (actual delivery) or `partial` (the partial produced + named
+   remaining gap). Prompt-level contract.
+
+2. **REVIEWING — missing section is blocking.** If `## Hard
+   deliverables` is absent OR empty, Codex's review flags it as a
+   blocking finding titled "PRD missing Hard deliverables section".
+   If a previously-shelved item turns out to substantially refer to
+   a hard deliverable, Codex re-raises it as blocking. Prompt-level
+   contract.
+
+3. **GOAL-CHECK — orchestrator-level hard gate (the enforcement teeth).**
+   After either agent's goal-check returns, the orchestrator reads
+   PRD's `## Hard deliverables` independently and cross-checks each
+   entry against the agent's `missing[]` and `shelved[]`. Any match
+   overrides `done=true` to `done=false`, prepends a gate message to
+   the rationale, and emits a `Note` event naming the matched items.
+   **This fires regardless of prompt compliance** — it's the
+   belt-and-suspenders that catches a dishonest or confused goal-check.
+
+### The matching algorithm (why not Jaccard here?)
+
+v1.6's stagnation detector uses token-set Jaccard at threshold 0.35.
+That algorithm misses the hard-deliverable case completely: the PRD's
+hard deliverable uses product language ("Linux distribution ISO file
+produced by the build pipeline") while the shelved/missing item uses
+gap language ("Full end-to-end ISO artifact is still missing"). Shared
+tokens: one (`iso`), Jaccard: 1/16 ≈ 0.06.
+
+v1.7 adds `jaccard::match_any_deliverable`, a **distinguishing-token
+overlap** matcher:
+
+- Tokenize both strings via the same tokenizer (lowercase, strip ASCII
+  punctuation, filter tokens shorter than 3 chars).
+- Drop a curated STOP_WORDS list (articles, copulas, pronouns,
+  adverbs, session-meta vocabulary like "missing"/"shelved"/"user",
+  and generic tech nouns like "file"/"build"/"code").
+- If any remaining distinguishing token appears in both strings, it's
+  a match.
+
+The Hermes Linux case now matches via `iso`, as intended. The false
+neighbors it was built to reject — "Docker missing" vs "Codex missing"
+(shared only "missing", filtered), "flat vs nested config keys" vs
+anything ISO-shaped (no overlap) — stay rejected.
+
+Biased toward false positives: a spurious match costs one extra
+"rejected done" round, which is cheap. A false negative silently ships
+an undelivered goal, which is the exact bug this release exists to fix.
+
+### Added
+
+- `prompts/planning.md` — new `## Hard deliverables` section spec +
+  "Hard deliverables rules" body block with sentinel line
+  `- no concrete artifact required per GOAL.md` for abstract goals.
+- `prompts/refining.md` — MANDATORY grep-before-shelve clause.
+- `prompts/reviewing.md` — two new blocking-finding triggers
+  (missing section, shelved-hard re-raise).
+- `prompts/goal-check.md` — done=true gate rule + hard-deliverables
+  walkthrough requirement before answering.
+- `jaccard::match_any_deliverable` — distinguishing-token-overlap
+  matcher (7 tests covering the real ISO case, multi-deliverable
+  indexing, empty-edge-cases, stop-word noise rejection,
+  domain-disjoint rejection).
+- `parsers::parse_hard_deliverables` + `has_hard_deliverables_section`
+  — PRD section extractors tolerating numbered headings, mixed bullet
+  prefixes, trailing EOF, case variance, and the sentinel line (8
+  tests).
+- `orchestrator::hard_deliverable_gate` — per-agent goal-check
+  post-processor that runs the gate and emits the Note event.
+
+### Engineering notes
+
+- **The gate fires in the orchestrator, not the reducer.** The reducer
+  still sees the gated `done=false` result via `GoalCheckResult` and
+  proceeds normally (round advance → REFINING). Keeping the gate in
+  the orchestrator means the reducer's contract is "do what the
+  command says"; interpretation of what DONE means lives one layer up.
+- **Both agents are gated independently.** If Claude says done=true
+  and Codex says done=false, and Claude's claim hits the gate,
+  Claude's done gets flipped to false. Both agents then correctly
+  report done=false and the session continues. The DONE transition
+  requires both to say done=true *after* the gate.
+- **Deliverables list is empty → gate is a no-op.** If PLANNING
+  hasn't written the section (first-round race) or it contains only
+  the sentinel (abstract goal), the orchestrator skips the match
+  scan entirely. Reviewing will flag the absence separately.
+
+### Tests
+
+- `cargo test -p cccplayer-core jaccard` — 22/22 pass (7 new).
+- `cargo test -p cccplayer-harness parsers` — 27/27 pass (8 new).
+
+### Not included in this release
+
+- A UI panel that visualizes the Hard deliverables list on the
+  session report. For now the gate's Note event surfaces in the
+  highlights timeline; dedicated visualization is deferred.
+- Automatic `attempted_alternatives` / `counter_argument` enforcement
+  at file-parse time (v1.6 still trusts the prompts).
+
+---
+
 ## v1.6.1 · 2026-04-20
 
 Small UX follow-up on top of v1.6.0's GOAL.md conflict modal.

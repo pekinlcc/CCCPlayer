@@ -77,12 +77,87 @@ pub fn jaccard(a: &str, b: &str) -> f64 {
 /// distinct problems "the same" (→ B true → risk of unjust kill).
 pub const DEFAULT_THRESHOLD: f64 = 0.35;
 
+/// Words too generic to count as distinguishing overlap for the v1.7
+/// hard-deliverable gate. Curated — we bias toward a *small* list (more
+/// tokens counted as distinguishing ⇒ more matches ⇒ more gate fires ⇒
+/// safer). Add here only when a real false-positive is observed.
+///
+/// The list is ASCII-only. CJK and other non-ASCII tokens are never filtered
+/// (they're high-signal by construction).
+const STOP_WORDS: &[&str] = &[
+    // articles / prepositions / conjunctions
+    "the", "and", "for", "from", "with", "into", "onto", "upon",
+    "that", "this", "these", "those", "what", "which", "whose",
+    "where", "when", "while", "also", "than", "then",
+    // copulas / aux
+    "are", "was", "were", "been", "being", "will", "would", "could",
+    "should", "has", "have", "had", "can", "may", "must", "shall",
+    // pronouns
+    "its", "our", "their", "his", "her", "you", "they",
+    // adverbs / quantifiers / negation
+    "very", "just", "only", "still", "already", "yet", "not",
+    "some", "any", "all", "each", "every", "more", "most", "less",
+    "never", "ever", "both", "either", "neither",
+    // session-meta / status vocabulary (high churn, low signal)
+    "item", "items", "user", "agent", "session", "round",
+    "missing", "shelved", "pending", "partial", "complete", "completed",
+    "produced", "available", "unavailable", "present", "absent",
+    "required", "optional", "needed",
+    // generic tech nouns (would dominate on naive overlap)
+    "file", "files", "code", "source", "build", "output", "result",
+    "data", "input", "line", "path", "thing", "stuff",
+];
+
+/// The v1.7 hard-deliverable gate (orchestrator post-processing of goal-check
+/// results) matches on "distinguishing token overlap" rather than raw
+/// Jaccard. Rationale: hard deliverables use product language the user
+/// recognizes ("Linux distribution ISO file") while shelved/missing items
+/// use gap language ("Full end-to-end ISO artifact is still missing"). The
+/// shared bag-of-words is often just one keyword (`iso`), driving Jaccard
+/// to ~0.06 — far below any threshold that wouldn't also generate false
+/// positives on generic prose.
+///
+/// We therefore filter out STOP_WORDS, then say: **any single surviving
+/// token that appears in both the candidate and the deliverable is a
+/// match**. Bias is toward false positives — a false hit causes an extra
+/// "confirm done" round, a false miss silently ships an undelivered goal.
+pub(crate) fn distinguishing_tokens(s: &str) -> HashSet<String> {
+    tokenize(s)
+        .into_iter()
+        .filter(|t| t.chars().count() >= 3)
+        .filter(|t| !STOP_WORDS.contains(&t.as_str()))
+        .collect()
+}
+
 /// Fraction of each list that must have a pair on the other side before two
 /// lists are considered "substantially the same". 0.8 tolerates one agent
 /// splitting or merging an item (e.g. `["docker missing", "ISO unbuilt"]`
 /// versus `["ISO+Docker pipeline unfinished"]`) without declaring content
 /// drift, but catches a real new item appearing.
 const PAIR_COVERAGE: f64 = 0.8;
+
+/// Single-item matcher: does `candidate` substantially refer to any entry in
+/// `hard_deliverables`? Used by the v1.7 hard-deliverable gate in the
+/// orchestrator to decide whether a shelved/missing item is actually a core
+/// deliverable dressed up as a design disagreement.
+///
+/// Uses [`distinguishing_tokens`] instead of Jaccard — see that function's
+/// doc for the rationale. Returns `Some(hit_index)` on match, `None`
+/// otherwise; the index lets the caller quote the matched deliverable
+/// verbatim in the override's explanation.
+pub fn match_any_deliverable(
+    candidate: &str,
+    hard_deliverables: &[String],
+) -> Option<usize> {
+    let cand = distinguishing_tokens(candidate);
+    if cand.is_empty() {
+        return None;
+    }
+    hard_deliverables.iter().position(|d| {
+        let dtoks = distinguishing_tokens(d);
+        !cand.is_disjoint(&dtoks)
+    })
+}
 
 /// Returns true when `curr` and `prev` missing-item lists represent the same
 /// underlying issues (per Jaccard ≥ `threshold` and pair coverage ≥ 0.8
@@ -249,5 +324,77 @@ mod tests {
             &[],
             DEFAULT_THRESHOLD,
         ));
+    }
+
+    // ----- v1.7 hard-deliverable matcher ----------------------------------
+
+    #[test]
+    fn hard_deliverable_match_catches_real_iso_case() {
+        // Pulled verbatim from the v1.6.x Hermes Linux false-DONE session
+        // this gate was built to catch. Hard deliverable uses product
+        // language; shelved item uses gap language; the only shared
+        // distinguishing token is `iso` — which is enough to fire the gate.
+        let deliverables = v(&[
+            "Linux distribution ISO file produced by the build pipeline",
+        ]);
+        let shelved = "Full end-to-end ISO artifact is still missing";
+        let hit = match_any_deliverable(shelved, &deliverables);
+        assert_eq!(hit, Some(0), "shelved ISO gap must match deliverable");
+    }
+
+    #[test]
+    fn hard_deliverable_no_match_on_unrelated_item() {
+        let deliverables = v(&[
+            "Linux distribution ISO file produced by the build pipeline",
+        ]);
+        // Classic design disagreement — no overlap with iso/linux/pipeline.
+        let shelved = "flat vs nested config keys";
+        assert!(match_any_deliverable(shelved, &deliverables).is_none());
+    }
+
+    #[test]
+    fn hard_deliverable_match_multiple_deliverables_returns_first_hit() {
+        let deliverables = v(&[
+            "Hermes Agent configuration wizard boots on first login",
+            "Linux distribution ISO file produced by the build pipeline",
+        ]);
+        let item = "ISO artifact not yet built end-to-end";
+        // `iso` is the distinguishing token shared with deliverable #1.
+        assert_eq!(match_any_deliverable(item, &deliverables), Some(1));
+    }
+
+    #[test]
+    fn hard_deliverable_empty_deliverables_never_matches() {
+        // Planning may produce zero deliverables (abstract goal with the
+        // sentinel line). In that case the gate must be a no-op.
+        assert!(match_any_deliverable("anything at all", &[]).is_none());
+    }
+
+    #[test]
+    fn hard_deliverable_empty_candidate_never_matches() {
+        let deliverables = v(&["Linux ISO"]);
+        assert!(match_any_deliverable("", &deliverables).is_none());
+        assert!(match_any_deliverable("   ", &deliverables).is_none());
+    }
+
+    #[test]
+    fn hard_deliverable_stop_words_dont_produce_false_match() {
+        // Two items whose only shared tokens are stop-word noise must not
+        // cross-match.
+        let deliverables = v(&["the user file has been produced and complete"]);
+        let candidate = "the missing output file still needed";
+        assert!(
+            match_any_deliverable(candidate, &deliverables).is_none(),
+            "shared tokens are all in STOP_WORDS — must not match"
+        );
+    }
+
+    #[test]
+    fn hard_deliverable_distinct_domains_dont_match() {
+        // "Docker missing" vs "iso missing" — the single shared token is
+        // "missing", which is in STOP_WORDS. No match.
+        let deliverables = v(&["Linux ISO artifact"]);
+        let candidate = "Docker daemon";
+        assert!(match_any_deliverable(candidate, &deliverables).is_none());
     }
 }
