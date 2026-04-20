@@ -157,6 +157,87 @@ pub struct ReviewParse {
     pub non_blocking: Vec<String>,
 }
 
+/// Per-round "did the agent attempt a genuinely new angle this round"
+/// signals extracted from a fully-populated `codex_review_v{N}.md` (i.e.
+/// after the REFINING phase appended `## Claude Code 回应`).
+///
+/// Consumed by the v1.6 stagnation detector (condition ¬C). See
+/// PRD §11.6 and the module doc in `cccplayer_core::jaccard`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RoundAttempts {
+    /// Claude's refining response contained at least one
+    /// `attempted_alternatives:` line that was both non-empty and not the
+    /// sentinel phrase `no new angle attempted this round`.
+    pub claude_tried_new_angle: bool,
+    /// Codex's review contained at least one `counter_argument:` line that
+    /// was both non-empty and not the sentinel phrase
+    /// `conceded; Claude's reason is sound`.
+    pub codex_tried_new_angle: bool,
+}
+
+/// Sentinel phrase Claude writes under `attempted_alternatives` when it has
+/// run out of new angles on a rejected/shelved item. Matched
+/// case-insensitively so a capitalization wobble doesn't flip the signal.
+const CLAUDE_NO_NEW_ANGLE: &str = "no new angle attempted this round";
+/// Sentinel phrase Codex writes under `counter_argument` when it concedes
+/// a previously-contested item. Matched case-sensitively because Claude
+/// would need to pattern-recognize it in the next review; we want the
+/// exact string discipline the prompts require.
+const CODEX_CONCEDED: &str = "conceded; Claude's reason is sound";
+
+/// Extract per-round "new angle" signals from a fully-populated review file.
+/// See [`RoundAttempts`] for semantics.
+///
+/// Works on the review file AFTER Refining has appended Claude's response
+/// section — the Codex section comes first and contains any
+/// `counter_argument:` lines; the `## Claude Code 回应` section below that
+/// contains any `attempted_alternatives:` lines.
+pub fn parse_round_attempts(markdown: &str) -> RoundAttempts {
+    // Split at Claude's response heading so we don't cross-contaminate:
+    // Codex might verbatim-quote a Claude line and vice versa.
+    let (codex_section, claude_section) = match markdown.find("## Claude Code 回应") {
+        Some(idx) => (&markdown[..idx], &markdown[idx..]),
+        None => (markdown, ""),
+    };
+    RoundAttempts {
+        claude_tried_new_angle: has_concrete_field(
+            claude_section,
+            "attempted_alternatives",
+            |v| v.eq_ignore_ascii_case(CLAUDE_NO_NEW_ANGLE),
+        ),
+        codex_tried_new_angle: has_concrete_field(
+            codex_section,
+            "counter_argument",
+            |v| v.contains(CODEX_CONCEDED),
+        ),
+    }
+}
+
+/// Does `section` contain at least one `- <field>: <value>` line where
+/// `value` is non-empty AND is not the sentinel (as judged by `is_sentinel`)?
+fn has_concrete_field(
+    section: &str,
+    field: &str,
+    is_sentinel: impl Fn(&str) -> bool,
+) -> bool {
+    let pattern = format!(r"(?mi)^\s*-\s*{}\s*:\s*(.+?)\s*$", regex::escape(field));
+    let Ok(re) = Regex::new(&pattern) else {
+        return false;
+    };
+    for cap in re.captures_iter(section) {
+        let Some(v) = cap.get(1) else { continue };
+        let val = v.as_str().trim();
+        if val.is_empty() {
+            continue;
+        }
+        if is_sentinel(val) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 /// Parse the trailing `## Verdict` section of a `codex_review_v{N}.md`.
 /// See PRD §10 and §17.4.
 pub fn parse_review(markdown: &str) -> Option<ReviewParse> {
@@ -396,5 +477,113 @@ mod tests {
     fn prd_malformed_missing_section() {
         let md = "# PRD\n## Goal\nx\n## Design\n-";
         assert!(!prd_is_well_formed(md));
+    }
+
+    // ----- v1.6 stagnation: new-angle signals ---------------------------------
+
+    #[test]
+    fn round_attempts_both_agents_tried() {
+        let md = r#"# Codex Review v3
+## Findings
+### Docker unavailable
+- severity: blocking
+- prior_rounds: 2
+- counter_argument: measured /health at 0.3ms; Claude's perf reason doesn't apply here
+## Verdict
+- status: blocked
+- blocking:
+  - Docker unavailable
+
+## Claude Code 回应
+### Docker unavailable
+- status: rejected
+- contested_rounds: 2
+- reason: no sandbox access
+- attempted_alternatives: tried podman this round; same sandbox wall, not just docker
+- goal_impact: shelving is safe because CI can build ISO out-of-sandbox
+"#;
+        let r = parse_round_attempts(md);
+        assert!(r.claude_tried_new_angle);
+        assert!(r.codex_tried_new_angle);
+    }
+
+    #[test]
+    fn round_attempts_claude_used_sentinel() {
+        let md = r#"## Claude Code 回应
+### Docker unavailable
+- status: rejected
+- contested_rounds: 3
+- attempted_alternatives: no new angle attempted this round
+"#;
+        let r = parse_round_attempts(md);
+        assert!(!r.claude_tried_new_angle);
+    }
+
+    #[test]
+    fn round_attempts_claude_used_sentinel_case_insensitive() {
+        // Capitalization wobble must not flip the signal.
+        let md = "## Claude Code 回应\n\
+                  - attempted_alternatives: No New Angle Attempted This Round\n";
+        let r = parse_round_attempts(md);
+        assert!(!r.claude_tried_new_angle);
+    }
+
+    #[test]
+    fn round_attempts_codex_conceded() {
+        let md = r#"## Findings
+### Docker unavailable
+- counter_argument: conceded; Claude's reason is sound
+## Verdict
+- status: approved
+"#;
+        let r = parse_round_attempts(md);
+        assert!(!r.codex_tried_new_angle);
+    }
+
+    #[test]
+    fn round_attempts_claude_field_in_codex_section_ignored() {
+        // If a counter_argument line ever shows up in Claude's response
+        // block we do NOT count it toward Codex tried-new — per-section
+        // parsing keeps the signals disjoint.
+        let md = r#"## Findings
+### X
+- severity: blocking
+
+## Claude Code 回应
+### X
+- counter_argument: Codex was right, I'll accept next round
+"#;
+        let r = parse_round_attempts(md);
+        assert!(!r.codex_tried_new_angle);
+    }
+
+    #[test]
+    fn round_attempts_empty_values_ignored() {
+        let md = r#"## Findings
+### X
+- counter_argument:
+
+## Claude Code 回应
+### X
+- attempted_alternatives:
+"#;
+        let r = parse_round_attempts(md);
+        assert!(!r.claude_tried_new_angle);
+        assert!(!r.codex_tried_new_angle);
+    }
+
+    #[test]
+    fn round_attempts_no_response_section_still_parses_codex() {
+        // Review file before Refining has appended Claude's response — we
+        // should still pick up Codex's counter_argument signals from whatever
+        // the file has so far.
+        let md = r#"# Codex Review v2
+## Findings
+### Docker unavailable
+- counter_argument: measured hot path at 0.3ms, Claude's perf rejection no longer holds
+"#;
+        let r = parse_round_attempts(md);
+        assert!(r.codex_tried_new_angle);
+        assert!(!r.claude_tried_new_angle);
     }
 }

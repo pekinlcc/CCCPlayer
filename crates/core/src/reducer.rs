@@ -7,8 +7,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::events::{Agent, Event, EventKind, TurnOutcome};
+use crate::jaccard::{self, DEFAULT_THRESHOLD};
 use crate::session::SessionMeta;
 use crate::state::{Phase, SessionState, Verdict};
+
+/// How many rounds the v1.6 stagnation detector needs in-window before it
+/// will even consider firing. All three of A (count non-decreasing) + B
+/// (same items) + ¬C (neither agent tried new angles) must hold across the
+/// whole window. Loosened from v1.5's 3 to v1.6's 5 because the triple gate
+/// is strict enough that 3 feels jumpy on large sessions — see PRD §11.6.
+const STAGNATION_WINDOW: usize = 5;
 
 /// Commands that can mutate session state. Produced by UI clicks, watchdogs,
 /// harness completions.
@@ -45,6 +53,18 @@ pub enum StateCommand {
         shelved: Vec<String>,
         rationale: String,
     },
+    /// After REFINING completes the orchestrator reads the just-finished
+    /// `codex_review_v{N}.md` (which by then contains both Codex's findings
+    /// and Claude's response section) and extracts two booleans: did either
+    /// agent write a *concrete* `attempted_alternatives` / `counter_argument`
+    /// this round (non-empty, non-sentinel)? Reducer stamps those booleans
+    /// onto the latest missing-history entry and re-evaluates the v1.6
+    /// stagnation detector. Added v1.6.
+    RoundAttemptsParsed {
+        round: u32,
+        claude_tried_new_angle: bool,
+        codex_tried_new_angle: bool,
+    },
     /// External event required immediate pause.
     ForcePause { reason: String },
     /// Harness reports authentication failure.
@@ -78,6 +98,36 @@ pub enum Effect {
     NotifyAttention { reason: String },
 }
 
+/// Per-round signals captured for the v1.6 stagnation detector. One entry is
+/// pushed onto `Reducer::missing_history` the moment both agents' goal-checks
+/// are in for a round; `attempted_*` fields get stamped later, after REFINING
+/// completes and the orchestrator parses the just-finalized review file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundProbe {
+    pub round: u32,
+    pub claude_missing: Vec<String>,
+    pub codex_missing: Vec<String>,
+    pub claude_done: bool,
+    pub codex_done: bool,
+    /// Set later via `StateCommand::RoundAttemptsParsed`.
+    pub claude_tried_new_angle: bool,
+    pub codex_tried_new_angle: bool,
+    /// `true` once the orchestrator has fed us the attempted-alternatives
+    /// signals for this round. If false when the detector runs, treat the
+    /// round as not-yet-scored (agent may still be writing) — never kill on
+    /// rounds we don't have full data for.
+    pub attempts_recorded: bool,
+}
+
+impl RoundProbe {
+    /// max(claude_missing.len(), codex_missing.len()) — the "worst" of the
+    /// two per-round counts, matching the v1.4.1-vintage scalar history.
+    /// Retained for the NotifyAttention reason string and UI reports.
+    pub fn worst_missing_count(&self) -> u32 {
+        self.claude_missing.len().max(self.codex_missing.len()) as u32
+    }
+}
+
 pub struct Reducer {
     meta: SessionMeta,
     /// Latest review verdict observed for the current round, if any.
@@ -85,17 +135,16 @@ pub struct Reducer {
     /// Latest Goal-Check results for current round.
     gc_claude: Option<bool>,
     gc_codex: Option<bool>,
-    /// Per-agent missing count for current round's goal-check. We need both
-    /// so stagnation detection can push ONE entry per round (max of the
-    /// two) instead of one per GoalCheckResult — otherwise an [A,B]
-    /// alternating sequence where the agents disagree looks exactly like
-    /// "progress not decreasing" and the detector fires incorrectly.
-    /// See decision #84 in PRD. Added v1.4.1.
-    gc_claude_missing: Option<u32>,
-    gc_codex_missing: Option<u32>,
-    /// Missing list sizes across the last few rounds for stagnation
-    /// detection. One entry per round (not per GoalCheckResult).
-    missing_history: Vec<u32>,
+    /// Per-agent missing lists for current round's goal-check. Retained until
+    /// both agents report in, then drained into a new `RoundProbe` pushed
+    /// onto `missing_history`. Counts are derivable from `.len()`.
+    gc_claude_missing: Option<Vec<String>>,
+    gc_codex_missing: Option<Vec<String>>,
+    /// Rolling per-round signals for stagnation detection. Only the last
+    /// `STAGNATION_WINDOW` entries are referenced; older entries are kept so
+    /// the session report can show the full trajectory. Upgraded in v1.6
+    /// from `Vec<u32>` (counts only) to full probes.
+    missing_history: Vec<RoundProbe>,
     /// retries counter per (agent, rolling-last-5-turns) for §16.8 flapping.
     recent_retries: Vec<(Agent, u32)>,
     /// Per-phase retry count for the CURRENT turn. Reset on Ok / phase change.
@@ -117,6 +166,13 @@ impl Reducer {
             recent_retries: Vec::new(),
             turn_retries: 0,
         }
+    }
+
+    /// Read-only view of the rolling per-round stagnation probes. Exposed
+    /// for session-report rendering (v1.6 terminal-state shows the last
+    /// `STAGNATION_WINDOW` entries when the detector fires).
+    pub fn missing_history(&self) -> &[RoundProbe] {
+        &self.missing_history
     }
 
     pub fn meta(&self) -> &SessionMeta {
@@ -342,7 +398,11 @@ impl Reducer {
                         self.gc_codex = None;
                         self.gc_claude_missing = None;
                         self.gc_codex_missing = None;
-                        self.transition(&mut effects, SessionState::Running, Phase::GoalCheck);
+                        self.transition(
+                            &mut effects,
+                            SessionState::Running,
+                            Phase::GoalCheck,
+                        );
                         effects.push(Effect::LaunchTurn {
                             agent: Agent::Claude,
                             phase: Phase::GoalCheck,
@@ -374,13 +434,18 @@ impl Reducer {
                 shelved,
                 rationale,
             } => {
+                // Emit the full-fidelity event to UI / events.log. We keep a
+                // copy of `missing` (clone) in reducer state so we can build
+                // a `RoundProbe` once both agents report in; the other fields
+                // are consumed solely by the UI.
+                let missing_for_event = missing.clone();
                 effects.push(Effect::Emit(Event::new(
                     self.meta.round,
                     EventKind::GoalCheck {
                         agent,
                         done,
                         missing_count,
-                        missing,
+                        missing: missing_for_event,
                         shelved,
                         rationale,
                     },
@@ -388,11 +453,11 @@ impl Reducer {
                 match agent {
                     Agent::Claude => {
                         self.gc_claude = Some(done);
-                        self.gc_claude_missing = Some(missing_count);
+                        self.gc_claude_missing = Some(missing);
                     }
                     Agent::Codex => {
                         self.gc_codex = Some(done);
-                        self.gc_codex_missing = Some(missing_count);
+                        self.gc_codex_missing = Some(missing);
                     }
                 }
                 if let (Some(c), Some(d)) = (self.gc_claude, self.gc_codex) {
@@ -400,54 +465,80 @@ impl Reducer {
                         self.transition(&mut effects, SessionState::Done, Phase::Idle);
                         effects.push(Effect::NotifyDone);
                     } else {
-                        // Push ONE entry per round — the worse of the two
-                        // agents' missing counts. Otherwise a pattern like
-                        // Claude=0, Codex=3 (repeating) looks to the
-                        // stagnation detector like [0,3,0,3,0,3] which has
-                        // non-decreasing subsequences even though the
-                        // conversation isn't actually stuck — one agent
-                        // just consistently says done. See decision #84
-                        // in PRD for the failure mode this fixes.
-                        let worst = self
-                            .gc_claude_missing
-                            .unwrap_or(0)
-                            .max(self.gc_codex_missing.unwrap_or(0));
-                        self.missing_history.push(worst);
-                        if self.is_stagnating() {
-                            let reason = format!(
-                                "stagnation detector fired: worst-case missing \
-                                 count did not strictly decrease across last 3 \
-                                 rounds (history: {:?}). One agent may be \
-                                 consistently blocking on the same items — \
-                                 review `codex_review_v*.md` and consider \
-                                 shelving the repeat offenders.",
-                                self.missing_history
-                            );
-                            effects.push(Effect::Emit(Event::new(
-                                self.meta.round,
-                                EventKind::Note {
-                                    message: reason.clone(),
-                                },
-                            )));
-                            self.transition(
-                                &mut effects,
-                                SessionState::Errored,
-                                self.meta.phase,
-                            );
-                            effects.push(Effect::NotifyAttention { reason });
-                        } else {
-                            self.meta.round += 1;
-                            self.transition(
-                                &mut effects,
-                                SessionState::Running,
-                                Phase::Refining,
-                            );
-                            effects.push(Effect::LaunchTurn {
-                                agent: Agent::Claude,
-                                phase: Phase::Refining,
-                            });
-                        }
+                        // Push ONE RoundProbe per round — the attempts flags
+                        // get stamped later via RoundAttemptsParsed once
+                        // REFINING has written Claude's response section.
+                        // Without this "one per round" discipline a pattern
+                        // like Claude=0, Codex=3 (repeating) looks like
+                        // [0,3,0,3,0,3] and the stagnation detector
+                        // misfires — see decision #84 in PRD. Carried over
+                        // from v1.4.1 into the v1.6 RoundProbe shape.
+                        let probe = RoundProbe {
+                            round: self.meta.round,
+                            claude_missing: self
+                                .gc_claude_missing
+                                .take()
+                                .unwrap_or_default(),
+                            codex_missing: self
+                                .gc_codex_missing
+                                .take()
+                                .unwrap_or_default(),
+                            claude_done: c,
+                            codex_done: d,
+                            claude_tried_new_angle: false,
+                            codex_tried_new_angle: false,
+                            attempts_recorded: false,
+                        };
+                        self.missing_history.push(probe);
+                        // Advance to REFINING. Stagnation is NOT checked
+                        // here — we need the attempts signals first, which
+                        // only arrive after Refining writes its response
+                        // section. Detector runs on
+                        // `StateCommand::RoundAttemptsParsed`.
+                        self.meta.round += 1;
+                        self.transition(
+                            &mut effects,
+                            SessionState::Running,
+                            Phase::Refining,
+                        );
+                        effects.push(Effect::LaunchTurn {
+                            agent: Agent::Claude,
+                            phase: Phase::Refining,
+                        });
                     }
+                }
+            }
+            StateCommand::RoundAttemptsParsed {
+                round,
+                claude_tried_new_angle,
+                codex_tried_new_angle,
+            } => {
+                // Find the matching probe by round. Usually the most-recent
+                // entry, but orchestrator retries / replays could place it
+                // elsewhere — scan from the back.
+                if let Some(probe) = self
+                    .missing_history
+                    .iter_mut()
+                    .rev()
+                    .find(|p| p.round == round)
+                {
+                    probe.claude_tried_new_angle = claude_tried_new_angle;
+                    probe.codex_tried_new_angle = codex_tried_new_angle;
+                    probe.attempts_recorded = true;
+                }
+                if let Some(reason) = self.stagnation_reason() {
+                    effects.push(Effect::Emit(Event::new(
+                        self.meta.round,
+                        EventKind::Note {
+                            message: reason.clone(),
+                        },
+                    )));
+                    self.transition(
+                        &mut effects,
+                        SessionState::Errored,
+                        self.meta.phase,
+                    );
+                    effects.push(Effect::NotifyAttention { reason });
                 }
             }
         }
@@ -488,14 +579,100 @@ impl Reducer {
         }
     }
 
-    fn is_stagnating(&self) -> bool {
-        // Per PRD §11: connected 3 rounds where combined missing size does not
-        // strictly decrease.
-        if self.missing_history.len() < 3 {
-            return false;
+    /// Returns `Some(reason)` if the v1.6 triple-gate (A ∧ B ∧ ¬C) fires on
+    /// the trailing `STAGNATION_WINDOW` rounds, `None` otherwise. The reason
+    /// string is human-readable and stamped onto both the `Note` event and
+    /// the `NotifyAttention` payload so the session report can display it.
+    ///
+    /// Gates:
+    /// - **A**: worst-case missing count across the window did not strictly
+    ///   decrease (i.e. at least one round-over-round step was flat or up).
+    /// - **B**: each agent's missing list is substantially the same across
+    ///   every adjacent pair in the window (Jaccard-based pairing).
+    /// - **¬C**: *neither* agent wrote a concrete
+    ///   `attempted_alternatives` / `counter_argument` in *any* round of the
+    ///   window — per prompt contract, the sentinels "no new angle attempted
+    ///   this round" / "conceded; Claude's reason is sound" signal no genuine
+    ///   new attempt, and any round without full attempts data is skipped.
+    ///
+    /// Returns `None` (= do not kill) whenever data is incomplete (fewer
+    /// than `STAGNATION_WINDOW` rounds or any round in the window missing
+    /// its `attempts_recorded` stamp). Safety bias: we never kill sessions
+    /// on partial information.
+    fn stagnation_reason(&self) -> Option<String> {
+        let n = self.missing_history.len();
+        if n < STAGNATION_WINDOW {
+            return None;
         }
-        let last3 = &self.missing_history[self.missing_history.len() - 3..];
-        !(last3[0] > last3[1] && last3[1] > last3[2])
+        let window = &self.missing_history[n - STAGNATION_WINDOW..];
+
+        // Require every round in the window to have its attempts stamp.
+        if !window.iter().all(|p| p.attempts_recorded) {
+            return None;
+        }
+
+        // Gate A — worst-count not strictly decreasing across window.
+        let counts: Vec<u32> = window.iter().map(|p| p.worst_missing_count()).collect();
+        let strictly_decreasing = counts.windows(2).all(|w| w[0] > w[1]);
+        if strictly_decreasing {
+            return None;
+        }
+
+        // Gate B — per-agent missing lists substantially the same across
+        // every adjacent pair in the window.
+        let claude_same = window.windows(2).all(|w| {
+            jaccard::lists_substantially_same(
+                &w[0].claude_missing,
+                &w[1].claude_missing,
+                DEFAULT_THRESHOLD,
+            )
+        });
+        let codex_same = window.windows(2).all(|w| {
+            jaccard::lists_substantially_same(
+                &w[0].codex_missing,
+                &w[1].codex_missing,
+                DEFAULT_THRESHOLD,
+            )
+        });
+        if !(claude_same && codex_same) {
+            return None;
+        }
+
+        // Gate ¬C — neither agent tried a new angle in ANY window round.
+        let any_tried = window
+            .iter()
+            .any(|p| p.claude_tried_new_angle || p.codex_tried_new_angle);
+        if any_tried {
+            return None;
+        }
+
+        // All gates held — build a reason that tells the user what actually
+        // happened. Three facts are load-bearing: window depth, the recurring
+        // items from the most recent round, and that NEITHER agent wrote a
+        // fresh attempt. Encourages the manual fix (shelve the repeat
+        // offenders in PRD) instead of just "we gave up".
+        let recurring = {
+            let last = window.last().expect("window non-empty");
+            let mut items: Vec<&str> = last
+                .claude_missing
+                .iter()
+                .chain(last.codex_missing.iter())
+                .map(String::as_str)
+                .collect();
+            items.sort_unstable();
+            items.dedup();
+            items.join(" · ")
+        };
+        let reason = format!(
+            "stagnation detector fired: missing-item lists have been \
+             substantially unchanged across the last {STAGNATION_WINDOW} \
+             rounds ({counts:?} worst-case), and NEITHER agent wrote a \
+             fresh `attempted_alternatives` / `counter_argument` in any of \
+             those rounds. Recurring items: {recurring}. \
+             Consider shelving repeat offenders in PRD's `## Shelved \
+             disagreements` so the loop can converge."
+        );
+        Some(reason)
     }
 }
 
@@ -642,11 +819,160 @@ mod tests {
         assert!(eff.iter().any(|e| matches!(e, Effect::NotifyDone)));
     }
 
+    // ----- v1.6 stagnation detector (A ∧ B ∧ ¬C, 5-round window) ----------
+
+    /// Build a 5-round history where every round has `count` identical
+    /// missing items and `attempts_recorded = true` by default; callers
+    /// tweak individual rounds via the closure.
+    fn history(
+        count: u32,
+        mut tweak: impl FnMut(&mut RoundProbe, usize),
+    ) -> Vec<RoundProbe> {
+        (0..STAGNATION_WINDOW)
+            .map(|i| {
+                let items: Vec<String> = (0..count)
+                    .map(|k| format!("repeated item #{k}"))
+                    .collect();
+                let mut p = RoundProbe {
+                    round: i as u32,
+                    claude_missing: items.clone(),
+                    codex_missing: items,
+                    claude_done: false,
+                    codex_done: false,
+                    claude_tried_new_angle: false,
+                    codex_tried_new_angle: false,
+                    attempts_recorded: true,
+                };
+                tweak(&mut p, i);
+                p
+            })
+            .collect()
+    }
+
     #[test]
-    fn stagnation_triggers_errored() {
+    fn stagnation_fires_on_repeated_items_without_new_angles() {
         let mut r = mk();
-        r.missing_history = vec![3, 3, 3];
-        assert!(r.is_stagnating());
+        r.missing_history = history(3, |_, _| {});
+        assert!(
+            r.stagnation_reason().is_some(),
+            "5 rounds with same items and no new angles must fire"
+        );
+    }
+
+    #[test]
+    fn stagnation_skipped_if_count_is_strictly_decreasing() {
+        // Gate A fails → not stagnation, regardless of B or C.
+        let mut r = mk();
+        r.missing_history = (0..STAGNATION_WINDOW)
+            .map(|i| {
+                let count = (STAGNATION_WINDOW - i) as u32;
+                let items: Vec<String> =
+                    (0..count).map(|k| format!("item #{k}")).collect();
+                RoundProbe {
+                    round: i as u32,
+                    claude_missing: items.clone(),
+                    codex_missing: items,
+                    claude_done: false,
+                    codex_done: false,
+                    claude_tried_new_angle: false,
+                    codex_tried_new_angle: false,
+                    attempts_recorded: true,
+                }
+            })
+            .collect();
+        assert!(r.stagnation_reason().is_none(), "count is decreasing, should not fire");
+    }
+
+    #[test]
+    fn stagnation_skipped_if_items_drift() {
+        // Gate B fails — round 3 swaps in a totally different missing item.
+        let mut r = mk();
+        r.missing_history = history(2, |p, i| {
+            if i == 3 {
+                p.claude_missing = vec!["totally unrelated problem".into()];
+                p.codex_missing = vec!["totally unrelated problem".into()];
+            }
+        });
+        assert!(
+            r.stagnation_reason().is_none(),
+            "items drifted, should not fire"
+        );
+    }
+
+    #[test]
+    fn stagnation_skipped_if_any_agent_tried_any_round() {
+        // Gate ¬C fails — Claude wrote a concrete attempted_alternatives
+        // in one of the rounds, signaling they're still thinking.
+        let mut r = mk();
+        r.missing_history = history(2, |p, i| {
+            if i == 2 {
+                p.claude_tried_new_angle = true;
+            }
+        });
+        assert!(
+            r.stagnation_reason().is_none(),
+            "Claude tried a new angle once; must not fire"
+        );
+    }
+
+    #[test]
+    fn stagnation_skipped_if_any_round_missing_attempts_stamp() {
+        // Safety bias: partial data → never kill.
+        let mut r = mk();
+        r.missing_history = history(2, |p, i| {
+            if i == 4 {
+                p.attempts_recorded = false;
+            }
+        });
+        assert!(
+            r.stagnation_reason().is_none(),
+            "incomplete attempts data; must not fire"
+        );
+    }
+
+    #[test]
+    fn stagnation_skipped_below_window_size() {
+        let mut r = mk();
+        r.missing_history = history(2, |_, _| {})
+            .into_iter()
+            .take(STAGNATION_WINDOW - 1)
+            .collect();
+        assert!(
+            r.stagnation_reason().is_none(),
+            "fewer than window rounds; must not fire"
+        );
+    }
+
+    #[test]
+    fn round_attempts_parsed_transitions_to_errored_when_stagnating() {
+        let mut r = mk();
+        // Seed 4 rounds of stagnation-looking history, then emit
+        // RoundAttemptsParsed for a 5th matching round. Detector should fire.
+        r.missing_history = history(2, |_, _| {})
+            .into_iter()
+            .take(STAGNATION_WINDOW - 1)
+            .collect();
+        // Push the 5th round with attempts_recorded=false so the command
+        // is what fills the signals in.
+        r.missing_history.push(RoundProbe {
+            round: 99,
+            claude_missing: vec!["repeated item #0".into(), "repeated item #1".into()],
+            codex_missing: vec!["repeated item #0".into(), "repeated item #1".into()],
+            claude_done: false,
+            codex_done: false,
+            claude_tried_new_angle: false,
+            codex_tried_new_angle: false,
+            attempts_recorded: false,
+        });
+        let effs = r.handle(StateCommand::RoundAttemptsParsed {
+            round: 99,
+            claude_tried_new_angle: false,
+            codex_tried_new_angle: false,
+        });
+        assert!(matches!(r.meta().state, SessionState::Errored));
+        assert!(effs
+            .iter()
+            .any(|e| matches!(e, Effect::NotifyAttention { .. })));
     }
 
     #[test]

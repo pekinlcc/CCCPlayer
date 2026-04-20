@@ -72,6 +72,24 @@ Pick N = max existing version + 1 (or 1 if none). Create
     - suggestion: <concrete change>
     - prior_rounds: <optional integer; number of prior reviews in
       which this same item was raised>
+    - counter_argument: <REQUIRED when prior_rounds >= 1 AND Claude
+      rejected this item in the previous round>
+      If you are re-raising an item Claude already rejected, you must
+      either:
+        (a) make a NEW counter to Claude's previous rejection reason
+            — a genuinely different angle, not a rewording. Example:
+            "Claude rejected on perf grounds; new counter: the hot
+             path is only called once per turn, measured <1 ms, so
+             the perf concern does not apply here."
+        (b) concede, with the exact sentinel phrase (no paraphrasing):
+            "conceded; Claude's reason is sound"
+            Conceding means you will NOT include this item in
+            blocking on next review either. If you concede 2 rounds
+            in a row, move it to Shelved disagreements.
+      If you re-raise without writing either (a) a substantive new
+      counter or (b) the exact "conceded" sentinel, the orchestrator
+      treats this as "repeating yourself" — it counts toward the
+      stagnation signal and can end the session.
     (repeat per finding)
 
     ## Verdict

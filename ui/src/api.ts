@@ -49,9 +49,49 @@ export async function classifyWorkdir(path: string): Promise<ClassifyResp> {
   return fn<ClassifyResp>('classify_workdir', { path })
 }
 
-export async function startSession(goal: string, workdir: string): Promise<void> {
+/**
+ * Thrown when the workdir already has a `GOAL.md` whose content differs from
+ * what the user typed, and `overwriteGoal` was not set. The UI should show a
+ * three-way modal (use existing / overwrite / cancel) and re-invoke
+ * `startSession` with the chosen resolution.
+ */
+export class GoalConflictError extends Error {
+  constructor(public existing: string) {
+    super('GOAL.md already exists with different content')
+    this.name = 'GoalConflictError'
+  }
+}
+
+export async function startSession(
+  goal: string,
+  workdir: string,
+  opts?: { overwriteGoal?: boolean },
+): Promise<void> {
   const fn = await invoke()
-  await fn<void>('start_session', { req: { goal, workdir } })
+  try {
+    await fn<void>('start_session', {
+      req: {
+        goal,
+        workdir,
+        overwrite_goal: opts?.overwriteGoal ?? false,
+      },
+    })
+  } catch (err: unknown) {
+    // Tauri serializes our StartError enum as { kind, ... }. Fall through to
+    // a generic Error for legacy string errors and anything we don't recognize
+    // so the caller still sees a helpful message.
+    if (typeof err === 'object' && err !== null && 'kind' in err) {
+      const kind = (err as { kind: string }).kind
+      if (kind === 'goal_conflict' && 'existing' in err) {
+        throw new GoalConflictError((err as { existing: string }).existing)
+      }
+      if (kind === 'other' && 'message' in err) {
+        throw new Error((err as { message: string }).message)
+      }
+    }
+    if (typeof err === 'string') throw new Error(err)
+    throw err
+  }
 }
 
 export async function pauseSession(): Promise<void> {

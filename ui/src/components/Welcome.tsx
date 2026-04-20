@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { classifyWorkdir, pickFolder, runPreflight, startSession } from '../api'
+import {
+  classifyWorkdir,
+  GoalConflictError,
+  pickFolder,
+  runPreflight,
+  startSession,
+} from '../api'
 import type { PreflightReport, SafetyVerdict } from '../types'
 import { Meter, PauseIcon, PlayIcon, Shell, StopIcon } from './Shell'
 
@@ -16,6 +22,7 @@ export function Welcome(props: {
   const [goal, setGoal] = useState('')
   const [safety, setSafety] = useState<SafetyVerdict | null>(null)
   const [starting, setStarting] = useState(false)
+  const [goalConflict, setGoalConflict] = useState<{ existing: string } | null>(null)
 
   useEffect(() => {
     void runPreflight().then(setPreflight)
@@ -53,6 +60,36 @@ export function Welcome(props: {
     try {
       await startSession(goal, workdir.trim())
       props.onStart(workdir.trim(), goal)
+    } catch (e) {
+      if (e instanceof GoalConflictError) {
+        // Surface the three-way modal and leave `starting` reset so the user
+        // isn't locked out of the UI while they decide.
+        setGoalConflict({ existing: e.existing })
+        return
+      }
+      throw e
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  async function resolveConflict(choice: 'use-existing' | 'overwrite' | 'cancel') {
+    if (!goalConflict) return
+    const existing = goalConflict.existing
+    setGoalConflict(null)
+    if (choice === 'cancel') return
+    setStarting(true)
+    try {
+      if (choice === 'use-existing') {
+        // Adopt the existing GOAL.md content as the session goal. Backend
+        // will see matching content and skip the rewrite.
+        setGoal(existing)
+        await startSession(existing, workdir.trim())
+        props.onStart(workdir.trim(), existing)
+      } else {
+        await startSession(goal, workdir.trim(), { overwriteGoal: true })
+        props.onStart(workdir.trim(), goal)
+      }
     } finally {
       setStarting(false)
     }
@@ -186,9 +223,69 @@ export function Welcome(props: {
         <span>Workdir</span>
         <code>{workdir.trim() || '—'}</code>
         <span className="spacer" />
-        <span>v1.5.0</span>
+        <span>v1.6.0</span>
       </div>
+      {goalConflict && (
+        <GoalConflictModal
+          existing={goalConflict.existing}
+          proposed={goal}
+          onPick={resolveConflict}
+        />
+      )}
     </Shell>
+  )
+}
+
+function GoalConflictModal(props: {
+  existing: string
+  proposed: string
+  onPick: (choice: 'use-existing' | 'overwrite' | 'cancel') => void
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal goal-conflict">
+        <div className="modal-title">GOAL.md already exists</div>
+        <div className="modal-body">
+          <p>
+            The workspace already has a <code>GOAL.md</code>. Pick one to continue.
+            The chosen goal becomes the session's immutable benchmark.
+          </p>
+          <div className="goal-diff">
+            <div className="goal-col">
+              <div className="goal-col-title">Existing GOAL.md</div>
+              <pre className="goal-preview">{props.existing.trim() || '(empty)'}</pre>
+            </div>
+            <div className="goal-col">
+              <div className="goal-col-title">Your new goal</div>
+              <pre className="goal-preview">{props.proposed.trim() || '(empty)'}</pre>
+            </div>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={() => props.onPick('cancel')}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => props.onPick('use-existing')}
+          >
+            Use existing
+          </button>
+          <button
+            type="button"
+            className="btn danger"
+            onClick={() => props.onPick('overwrite')}
+          >
+            Overwrite with new
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 

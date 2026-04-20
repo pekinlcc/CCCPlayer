@@ -57,6 +57,33 @@ pub fn classify_workdir(path: String) -> Result<ClassifyResp, String> {
 pub struct StartReq {
     pub goal: String,
     pub workdir: String,
+    /// When true, the provided `goal` replaces any existing `GOAL.md` in the
+    /// workdir. When false (default), a mismatch between existing GOAL.md and
+    /// `goal` is returned as `StartError::GoalConflict` so the UI can prompt.
+    #[serde(default)]
+    pub overwrite_goal: bool,
+}
+
+/// Structured start errors. Serialized to the frontend as
+/// `{ "kind": "goal_conflict", "existing": "..." }` or
+/// `{ "kind": "other", "message": "..." }` — the UI pattern-matches on `kind`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StartError {
+    /// `GOAL.md` already exists in the workdir and its content differs from
+    /// what the user typed. The UI shows a three-way modal (use existing /
+    /// overwrite / cancel) before re-invoking `start_session`.
+    GoalConflict { existing: String },
+    /// Any other start failure (missing CLI, bad workdir, lock contention).
+    Other { message: String },
+}
+
+impl From<anyhow::Error> for StartError {
+    fn from(e: anyhow::Error) -> Self {
+        StartError::Other {
+            message: format!("{e:#}"),
+        }
+    }
 }
 
 #[tauri::command]
@@ -64,12 +91,17 @@ pub async fn start_session(
     app: AppHandle,
     state: State<'_, AppState>,
     req: StartReq,
-) -> Result<(), String> {
-    let cfg = default_config().map_err(|e| e.to_string())?;
+) -> Result<(), StartError> {
+    let cfg = default_config()?;
     state
-        .start(app, PathBuf::from(req.workdir), req.goal, cfg)
+        .start(
+            app,
+            PathBuf::from(req.workdir),
+            req.goal,
+            req.overwrite_goal,
+            cfg,
+        )
         .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

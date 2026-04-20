@@ -67,6 +67,21 @@ path_drift item:
     - contested_rounds: <N> (only if status in {rejected, shelved};
       count of prior rounds this same item appeared and you
       maintained the same position).
+    - attempted_alternatives: <REQUIRED when contested_rounds >= 1 AND
+      status in {rejected, shelved}>
+      One line describing a NEW angle you tried this round that is
+      different from your previous rejection reason. Concrete examples:
+        "tried approach B (async batching) this round; same perf wall as A"
+        "attempted to vendor the upstream module; license blocks it"
+        "ran inside Docker this round; still missing Linux-only tool X"
+      If you are genuinely out of new angles on this item, state so
+      with the EXACT sentinel phrase (no paraphrasing):
+        no new angle attempted this round
+      That sentinel tells the orchestrator this item has hit a real
+      wall. Rewording your previous reason in different words counts
+      as "no new angle" — the orchestrator reads literal text. Be
+      honest: if you're stuck, say "no new angle attempted this
+      round". If you have a real new attempt, describe it concretely.
 
 ## PRD updates in this turn
 

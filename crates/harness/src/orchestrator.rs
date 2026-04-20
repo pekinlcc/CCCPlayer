@@ -21,7 +21,9 @@ use cccplayer_core::snapshot;
 use cccplayer_core::state::{Phase, SessionState, Verdict};
 use tokio::sync::{mpsc, watch};
 
-use crate::parsers::{extract_claude_text, parse_goal_check, parse_review};
+use crate::parsers::{
+    extract_claude_text, parse_goal_check, parse_review, parse_round_attempts,
+};
 use crate::runner::{parse_codex_total_tokens, HarnessRunner, StreamEvent, TurnInput};
 
 /// External handle to pause or stop a running Orchestrator without holding
@@ -246,6 +248,40 @@ impl Orchestrator {
             Phase::Planning | Phase::Implementing | Phase::Refining => {
                 let (result, delta) = self.run_turn(Agent::Claude, phase, events_tx).await?;
                 self.apply_usage_delta(Agent::Claude, delta, events_tx);
+                // v1.6 stagnation: after a successful REFINING, the latest
+                // codex_review_v{N}.md now contains BOTH Codex's findings
+                // (with any `counter_argument:` lines) AND Claude's response
+                // section (with any `attempted_alternatives:` lines). Parse
+                // it into per-round attempt signals and feed the reducer
+                // before transitioning out of Refining — the detector runs
+                // on that command. Only fire on Ok outcomes; partial /
+                // malformed turns go through the usual retry/error path.
+                if matches!(phase, Phase::Refining)
+                    && matches!(
+                        result.outcome,
+                        cccplayer_core::events::TurnOutcome::Ok
+                    )
+                {
+                    if let Some(n) = latest_review(self.session.workdir()) {
+                        let path = self
+                            .session
+                            .workdir()
+                            .join(format!("codex_review_v{n}.md"));
+                        if let Ok(body) = std::fs::read_to_string(&path) {
+                            let attempts = parse_round_attempts(&body);
+                            let effs = self.reducer.handle(
+                                StateCommand::RoundAttemptsParsed {
+                                    round: self.reducer.meta().round,
+                                    claude_tried_new_angle: attempts
+                                        .claude_tried_new_angle,
+                                    codex_tried_new_angle: attempts
+                                        .codex_tried_new_angle,
+                                },
+                            );
+                            self.apply_effects(effs, events_tx).await?;
+                        }
+                    }
+                }
                 self.handle_turn_result(result, events_tx).await?;
             }
             Phase::Reviewing => {

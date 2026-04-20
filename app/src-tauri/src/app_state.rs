@@ -18,6 +18,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
+use crate::commands::StartError;
+
 /// What Tauri's `manage()` keeps alive for us.
 pub struct AppState {
     pub running: Arc<Mutex<Option<RunningSession>>>,
@@ -38,38 +40,68 @@ impl AppState {
     }
 
     /// Start a new session or resume the existing one for `workdir`. Returns
-    /// an error if a different session is already running.
+    /// `StartError::Other` if a different session is already running or any
+    /// infra step fails; returns `StartError::GoalConflict` if the workdir
+    /// has a `GOAL.md` that differs from the caller-supplied `goal` and
+    /// `overwrite_goal` is `false`.
     pub async fn start(
         &self,
         app: AppHandle,
         workdir: PathBuf,
         goal: String,
+        overwrite_goal: bool,
         config: OrchestratorConfig,
-    ) -> Result<()> {
+    ) -> Result<(), StartError> {
         let mut guard = self.running.lock().await;
         if let Some(existing) = guard.as_ref() {
             if existing.workdir != workdir {
-                anyhow::bail!(
-                    "another session is already active on {}",
-                    existing.workdir.display()
-                );
+                return Err(StartError::Other {
+                    message: format!(
+                        "another session is already active on {}",
+                        existing.workdir.display()
+                    ),
+                });
             }
             if !existing.handle.is_finished() {
                 return Ok(()); // idempotent — "Start" is safe to double-click
             }
         }
 
-        // Write GOAL.md if missing.
+        // GOAL.md handling (v1.6 §16.5):
+        // - File absent → write it.
+        // - Present, content matches → leave alone.
+        // - Present, content differs, `overwrite_goal=false` → GoalConflict
+        //   so the UI can prompt.
+        // - Present, content differs, `overwrite_goal=true` → atomic rewrite.
+        // Trim comparisons to shrug off trailing newline differences that
+        // round-trip through the UI.
         let goal_path = workdir.join("GOAL.md");
-        if !goal_path.exists() {
+        if goal_path.exists() {
+            let existing =
+                std::fs::read_to_string(&goal_path).map_err(|e| StartError::Other {
+                    message: format!("read existing GOAL.md: {e}"),
+                })?;
+            if existing.trim() != goal.trim() {
+                if !overwrite_goal {
+                    return Err(StartError::GoalConflict { existing });
+                }
+                cccplayer_core::persistence::atomic_write(&goal_path, goal.as_bytes())
+                    .context("overwrite GOAL.md")
+                    .map_err(StartError::from)?;
+            }
+        } else {
             cccplayer_core::persistence::atomic_write(&goal_path, goal.as_bytes())
-                .context("write GOAL.md")?;
+                .context("write GOAL.md")
+                .map_err(StartError::from)?;
         }
 
-        let session = Session::open(&workdir).context("open session")?;
-        let mut orch = Orchestrator::new(session, config)?;
+        let session = Session::open(&workdir)
+            .context("open session")
+            .map_err(StartError::from)?;
+        let mut orch = Orchestrator::new(session, config).map_err(StartError::from)?;
         let cancel = orch.cancel_handle();
-        orch.ensure_initialized(goal.lines().next().unwrap_or(""))?;
+        orch.ensure_initialized(goal.lines().next().unwrap_or(""))
+            .map_err(StartError::from)?;
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
         let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<RawLogLine>();
@@ -212,8 +244,13 @@ fn schedule_auto_resume(
             }
         };
         let state = AppState { running };
-        if let Err(e) = state.start(app, workdir, goal, cfg).await {
-            tracing::warn!("auto-resume: start failed: {e:#}");
+        // overwrite_goal=true is safe here: rate-limit auto-resume on an
+        // already-initialized session means GOAL.md is whatever the agent
+        // has been running against; content should match, the write is a
+        // no-op. If someone raced in and edited the file meanwhile, §16.11
+        // fingerprint guard will catch it on the next step.
+        if let Err(e) = state.start(app, workdir, goal, true, cfg).await {
+            tracing::warn!("auto-resume: start failed: {e:?}");
         }
     });
 }

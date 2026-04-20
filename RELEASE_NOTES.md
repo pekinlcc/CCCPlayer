@@ -1,5 +1,139 @@
 # CCCPlayer Release Notes
 
+## v1.6.0 · 2026-04-20
+
+Two substantive behaviour changes — one that fixes a quiet data-loss
+bug, one that rebuilds the stagnation detector from the ground up
+after a real v1.5 session (Hermes Linux, 13 rounds) surfaced the
+detector's blind spots.
+
+### Fixed — GOAL.md conflict dialog (Part B)
+
+Before v1.6, starting a session on a workdir that already contained a
+`GOAL.md` would **silently ignore the goal the user typed in the UI**
+and proceed using the stale on-disk file. The session would then run
+with the wrong immutable benchmark — quietly divergent from the
+user's mental model.
+
+v1.6 fixes this:
+
+- **Backend** — `start_session` now returns a structured
+  `StartError::GoalConflict { existing }` when the workdir's
+  `GOAL.md` differs from the provided goal and `overwrite_goal=false`
+  (the default). `app_state::AppState::start` gains an
+  `overwrite_goal: bool` param; when `true` it atomic-rewrites the
+  file. Auto-resume (rate-limit recovery) passes `true` because by
+  then GOAL.md is whatever the running session has been executing
+  against.
+- **Frontend** — a three-way confirmation modal now surfaces the
+  conflict: **Use existing** (adopts the disk content as the session
+  goal), **Overwrite with new** (rewrites atomically), **Cancel**
+  (dismisses without starting). Both Goal contents are shown
+  side-by-side in the modal so the user can see what they're
+  deciding between.
+
+### Changed — stagnation detector rebuild (Part A)
+
+The v1.5 detector killed the loop whenever the worst-case
+`missing[]` count across 3 rounds wasn't strictly decreasing. That's
+a single-signal heuristic, and it misfires on sessions where:
+
+- the count is stable but the *items* are cycling through genuinely
+  different problems each round;
+- the items are repeating but Claude / Codex are actively trying new
+  angles (the loop is productive but slow); or
+- one agent is done and the other isn't — a 3-round flat stretch is
+  the norm, not a deadlock.
+
+v1.6 replaces that with a **triple-gate A ∧ B ∧ ¬C detector over a
+5-round window**. All three conditions must hold in the same window
+before the detector will fire:
+
+- **A** (count) — worst-case `missing[]` count did not strictly
+  decrease across the window.
+- **B** (items) — each agent's `missing[]` list is substantially the
+  same across every adjacent pair in the window, measured by a
+  Jaccard-pair algorithm (threshold 0.35, 80% pair coverage
+  in both directions). Calibrated against real v1.5 session data so
+  reworded identical items match while single-word-overlap false
+  neighbors (e.g. "Docker missing" vs "Codex missing" at J=0.33) do
+  not.
+- **¬C** (no new angles) — *neither* agent wrote a concrete
+  `attempted_alternatives` / `counter_argument` in *any* round of the
+  window. Sentinel phrases (`no new angle attempted this round`,
+  `conceded; Claude's reason is sound`) do **not** count as concrete
+  attempts, so honestly stuck items still register as stuck.
+
+**Safety bias**: the detector returns `None` whenever data is
+incomplete (fewer than 5 rounds, or any round missing its attempts
+stamp). We never kill sessions on partial information.
+
+The reducer gains a new `StateCommand::RoundAttemptsParsed` that the
+orchestrator sends after every successful REFINING turn — at that
+point the `codex_review_v{N}.md` file holds both Codex's findings
+(with any `counter_argument:` lines) and Claude's just-appended
+response section (with any `attempted_alternatives:` lines), so all
+three gate signals are known.
+
+When the detector does fire, the reason string sent to the session
+report now names the recurring items and suggests shelving them in
+PRD's `## Shelved disagreements`, rather than just "we gave up".
+
+### Added
+
+- `crates/core/src/jaccard.rs` — small similarity primitive with
+  language-agnostic tokenizer (CJK-safe, no stop words, no
+  stemming). 15 unit tests.
+- `parsers::parse_round_attempts` — extracts per-round attempt
+  signals from a fully-populated `codex_review_v{N}.md`. 7 unit
+  tests covering sentinel handling, per-section parsing, and empty
+  values.
+- `reducer::RoundProbe` replaces the scalar `missing_history:
+  Vec<u32>` — records per-agent missing lists, per-agent done flags,
+  per-agent tried-new-angle flags, plus an `attempts_recorded`
+  stamp so the detector knows when a round is fully scored. 7 new
+  stagnation-scenarios tests (kill/don't-kill matrix).
+- `reducer::StateCommand::RoundAttemptsParsed` — the new signal path.
+- UI: three-way `GoalConflictModal` in Welcome; `ui/src/styles.css`
+  gains a `.modal`/`.btn` set (cyberpunk-matched).
+
+### Engineering notes
+
+- The detector runs on `RoundAttemptsParsed`, not on
+  `GoalCheckResult`, because ¬C can only be evaluated after Refining
+  has written Claude's response section. GoalCheckResult still pushes
+  a fresh `RoundProbe` (with `attempts_recorded=false`); the
+  subsequent RefiningParsed stamps the bools on and invokes
+  `stagnation_reason()`.
+- Auto-resume's recursive `start()` call now passes
+  `overwrite_goal=true`. Argued safe: after a rate-limit pause the
+  session's GOAL.md is whatever the agent's been running against; any
+  external edit during the pause is separately caught by §16.11's
+  fingerprint guard on the next step.
+- No session-file schema changes. An in-flight v1.5.x session
+  reopened under v1.6 sees an empty `missing_history` (shape changed
+  from `Vec<u32>` to `Vec<RoundProbe>` but the field lives only in
+  reducer memory, not in persisted `session.json`).
+
+### Tests
+
+- `cargo test -p cccplayer-core` — 50/51 pass. The single failure is
+  the pre-existing `workdir::tmp_blacklisted` test which flakes on
+  machines with `*.key` files in `/tmp`; unrelated to v1.6.
+- `cargo test -p cccplayer-harness` — parser tests 19/19, fake-cli
+  and end-to-end intact. Two `stall::tests` failures pre-date v1.6
+  (wall-clock sensitive on loaded machines).
+
+### Not included in this release
+
+- Per-round stagnation context panel on the terminal-state screen
+  (duration + stuck items + attempts for the last 5 rounds). The
+  existing "reason:" line on the session report picks up the v1.6
+  rich reason string so the information is surfaced; a dedicated
+  panel with per-round visualisation is deferred.
+
+---
+
 ## v1.5.0 · 2026-04-19
 
 Fixes the "CLAUDE CODE CLI: Not on PATH" false negative reported by

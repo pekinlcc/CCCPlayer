@@ -968,3 +968,135 @@ html, body, #root {
   font-size: 15px; letter-spacing: 1.6px; font-weight: 700; color: var(--lime);
   text-shadow: 0 0 5px rgba(186, 255, 41, 0.45);
 }
+
+/* ====================================================================
+ * MODAL — used by the GOAL.md conflict dialog (v1.6)
+ * ==================================================================*/
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.modal {
+  width: 100%;
+  max-width: 760px;
+  background: linear-gradient(180deg, #1a1a28 0%, #0e0e18 100%);
+  border: 1px solid var(--magenta);
+  border-radius: 6px;
+  box-shadow:
+    0 0 0 1px rgba(255, 47, 214, 0.2),
+    0 12px 40px rgba(0, 0, 0, 0.6),
+    0 0 60px rgba(255, 47, 214, 0.18);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-title {
+  padding: 12px 16px;
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--magenta);
+  background: linear-gradient(180deg, #28182c, #150718);
+  border-bottom: 1px solid #30304a;
+  font-weight: 700;
+}
+
+.modal-body {
+  padding: 16px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.modal-body p { margin: 0 0 12px; }
+.modal-body code {
+  background: rgba(0, 229, 255, 0.12);
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: var(--cyan);
+}
+
+.goal-diff {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.goal-col-title {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 6px;
+}
+
+.goal-preview {
+  max-height: 200px;
+  overflow: auto;
+  background: #07070c;
+  border: 1px solid #2a2a40;
+  padding: 10px 12px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid #2a2a40;
+  background: #0a0a14;
+}
+
+.btn {
+  padding: 7px 14px;
+  background: #1a1a28;
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background 120ms, box-shadow 120ms;
+}
+
+.btn:hover {
+  background: rgba(0, 229, 255, 0.12);
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.28);
+}
+
+.btn.secondary {
+  border-color: var(--dim);
+  color: var(--dim);
+}
+.btn.secondary:hover {
+  background: rgba(108, 108, 134, 0.15);
+  box-shadow: none;
+}
+
+.btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.btn.danger:hover {
+  background: rgba(255, 53, 90, 0.14);
+  box-shadow: 0 0 8px rgba(255, 53, 90, 0.32);
+}

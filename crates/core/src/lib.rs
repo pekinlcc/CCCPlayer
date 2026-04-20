@@ -4,6 +4,7 @@
 //! also consume it.
 
 pub mod events;
+pub mod jaccard;
 pub mod persistence;
 pub mod preflight;
 pub mod prompt;
