@@ -1,5 +1,79 @@
 # CCCPlayer Release Notes
 
+## v1.7.3 · 2026-04-20
+
+Fixes a rate-limit false positive that poisons any session whose goal
+or PRD talks about API quotas.
+
+### Fixed — is_rate_limit no longer fires on ordinary prose
+
+`crates/harness/src/runner.rs::is_rate_limit` was a plain substring
+matcher with a broad needle list: `"usage limit"`, `"rate limit"`,
+`"rate-limit"`, `"quota exceeded"` among the matches. Those phrases
+appear in **any** ordinary prose that discusses API quotas — so the
+moment a session's goal said "a menubar app that shows the remaining
+usage limit for Claude Code", Claude's PLANNING output would quote
+the goal plus 10+ paraphrases, each mention counting as a rate-limit
+hit, and the session would flip to `PAUSED` with reason "claude
+rate-limited; resume when provider window rolls over" — despite zero
+actual quota issues.
+
+Observed in the wild on a TokenBar session (goal: monitor CLI usage
+limits). The planning transcript had 13 matches of the overly-generic
+needles (6× "rate-limit", 3× "usage limit", 2× "rate limit", 2×
+"Rate-limit") — all from Claude writing user-facing design prose,
+not from any CLI error.
+
+v1.7.3 restricts the needle list to phrases that **only appear in
+actual error bodies** from the CLIs or HTTP layer:
+
+| Kept | Dropped (too generic) |
+| --- | --- |
+| `"you've hit your usage limit"` (Codex exec exact phrase) | `"usage limit"` |
+| `"429 too many requests"` | `"rate limit"` |
+| `"retry-after:"` (HTTP header literal) | `"rate-limit"` |
+| `"quota has been exhausted"` | `"quota exceeded"` |
+| `"model rate limit reached"` (Claude CLI exact phrase) | `"hit your usage limit"` (subsumed) |
+| `"rate_limit_error"` (Anthropic API JSON error `type`) *new* | |
+| `"rate_limit_exceeded"` (OpenAI API JSON error `code`) *new* | |
+
+The underscored tokens (`rate_limit_error`, `rate_limit_exceeded`) are
+distinctive — they only appear in error-body JSON, never in user
+prose, so they add real-error coverage without re-opening the false
+positive.
+
+### Added
+
+- Six regression tests in `crates/harness/src/runner.rs`:
+  - Three positives: real Codex exec message, Anthropic API error
+    body, OpenAI API error body, HTTP 429 + Retry-After.
+  - Two negatives: PRD prose about rate/usage limits, and a
+    near-verbatim snippet of the TokenBar goal that triggered the
+    original bug.
+
+### Engineering notes
+
+- The classifier still scans BOTH stdout and stderr. Scoping to
+  stderr-only was considered but rejected: Codex's rate-limit message
+  is printed to stdout (not stderr), so stderr-only would miss real
+  Codex rate-limits.
+- `rate_limit_event` stream-json envelopes from Claude (routine
+  informational, fires on every call) do not match any v1.7.3 needle
+  because the underscore tokenization differs from the hyphen/space
+  forms we kept. Unchanged from v1.7.2.
+
+### Impact
+
+Any session written before v1.7.3 whose goal text mentioned "usage
+limit" / "rate limit" / "rate-limit" / "quota exceeded" could have
+been silently paused on its first planning turn with no actual rate
+limit in effect. This bug has been present since v1.3 (when the
+rate-limit detection was introduced). If you saw an unexpected
+"auto-resume" pause on a session whose goal discussed API quotas,
+that session was almost certainly hit by this bug.
+
+---
+
 ## v1.7.2 · 2026-04-20
 
 UI follow-up to v1.7.1. Now that the stall watcher actually works on

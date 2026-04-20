@@ -347,19 +347,32 @@ fn classify(
 
 /// Substring match for known rate-limit / quota-exhaustion signatures
 /// from Claude Code 2.x and Codex 0.1x. Case-insensitive.
+///
+/// **v1.7.3 tightening.** Earlier revisions included `"usage limit"` /
+/// `"rate limit"` / `"rate-limit"` / `"quota exceeded"` as needles — these
+/// are phrases that appear in ordinary prose whenever the goal or PRD
+/// discusses API quotas (e.g. "an app that shows the remaining usage
+/// limit for Claude Code"). Claude's own PLANNING output then contains
+/// them dozens of times and gets misclassified as a rate-limit error.
+/// The v1.7.3 set is restricted to phrases that **only appear in actual
+/// error bodies** from the two vendors' CLIs or HTTP layer.
 pub fn is_rate_limit(text: &str) -> bool {
     let s = text.to_lowercase();
     const NEEDLES: &[&str] = &[
-        "you've hit your usage limit",       // codex exec
-        "hit your usage limit",
-        "usage limit",
-        "rate limit",
-        "rate-limit",
+        // Codex exec, exact wording when user's quota is exhausted.
+        "you've hit your usage limit",
+        // Anthropic API error-body `type` fields. Distinctive underscore
+        // tokens that do not appear in user prose.
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        // HTTP layer — both are tightly scoped to real 429 responses.
         "429 too many requests",
-        "quota exceeded",
-        "quota has been exhausted",
-        "model rate limit reached",          // claude
         "retry-after:",
+        // Specific exhaustion wording observed in the wild from both
+        // vendors; kept narrow enough to avoid collision with
+        // "the quota has been exhausted for this week" style prose.
+        "quota has been exhausted",
+        "model rate limit reached",
     ];
     NEEDLES.iter().any(|n| s.contains(n))
 }
@@ -588,5 +601,65 @@ mod tests {
     #[test]
     fn codex_total_returns_none_when_missing() {
         assert_eq!(parse_codex_total_tokens("no tokens here\n"), None);
+    }
+
+    // ---- v1.7.3 rate-limit false-positive fix --------------------------------
+
+    #[test]
+    fn rate_limit_fires_on_codex_usage_limit_message() {
+        let msg = "Error: You've hit your usage limit — try again at 4:08 AM";
+        assert!(super::is_rate_limit(msg));
+    }
+
+    #[test]
+    fn rate_limit_fires_on_anthropic_api_error_body() {
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"..."}}"#;
+        assert!(super::is_rate_limit(body));
+    }
+
+    #[test]
+    fn rate_limit_fires_on_openai_api_error_body() {
+        let body = r#"{"error":{"code":"rate_limit_exceeded","message":"..."}}"#;
+        assert!(super::is_rate_limit(body));
+    }
+
+    #[test]
+    fn rate_limit_fires_on_http_429() {
+        assert!(super::is_rate_limit("HTTP/1.1 429 Too Many Requests"));
+        assert!(super::is_rate_limit("Retry-After: 3600"));
+    }
+
+    #[test]
+    fn rate_limit_does_not_fire_on_prd_prose_about_limits() {
+        // v1.7.3 regression: this PRD is an almost verbatim excerpt from a
+        // real session where the goal was to build a usage-monitoring app.
+        // Before v1.7.3, this stdout would have flipped the turn to
+        // RateLimited even though no actual rate-limit occurred.
+        let prd_prose = r#"
+## Goal
+Build a menubar app that shows remaining rate-limit / usage limit
+windows for Claude Code and Codex CLI.
+
+## Design
+- Poll the CLIs every few minutes for usage limit data.
+- Display a yellow warning when the user is approaching their rate limit.
+- Show remaining quota for each 5-hour rolling window.
+- Show retry-after countdown (conceptual, not literal HTTP header).
+"#;
+        assert!(
+            !super::is_rate_limit(prd_prose),
+            "PRD prose discussing rate/usage limits must not false-positive"
+        );
+    }
+
+    #[test]
+    fn rate_limit_does_not_fire_on_goal_text() {
+        // The user's TokenBar goal verbatim. Before v1.7.3 this was a
+        // poison pill — Claude's PLANNING output quotes the goal multiple
+        // times and paraphrases it dozens more, each mention counting as
+        // a rate-limit hit.
+        let goal = "周期内的用量，包括几小时内的用量和Weekly的用量的剩余量 \
+                    a.k.a. usage limit / rate-limit status";
+        assert!(!super::is_rate_limit(goal));
     }
 }
