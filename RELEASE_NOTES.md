@@ -1,5 +1,83 @@
 # CCCPlayer Release Notes
 
+## v1.7.1 · 2026-04-20
+
+Critical bug fix: the stall watcher has been silently disabled on
+macOS since v1.0 because of a wrong `CLOCK_MONOTONIC` constant.
+
+### Fixed — stall watcher was never actually running on macOS
+
+`crates/harness/src/stall.rs` hard-coded `CLOCK_MONOTONIC = 1` (the
+Linux value). On macOS the real value is 6 — the xnu kernel rejects
+clock-id 1 with `EINVAL`, and the existing error handler silently
+zeroed the `Timespec`:
+
+```rust
+if rc != 0 {
+    if !ts.is_null() {
+        *ts = Timespec::default();  // ← silent zero
+    }
+}
+```
+
+The effect: `now_ns()` returned 0 every call, `elapsed()` was always
+`0.saturating_sub(0) = 0`, and `is_stalled()` never became `true`. So
+for every macOS release up to v1.7.0, if a CLI child process wrote
+output and then hung (or exited without tokio noticing the pipe
+close), the orchestrator would sit waiting **forever** — with no
+stall-driven SIGINT / SIGTERM / SIGKILL escalation and no transition
+to `PAUSED`/`ERRORED`.
+
+This was observed in the wild on a Hermes Linux session at round 17
+REFINING: 169 minutes with zero new events, the session.json stuck
+in `RUNNING/REFINING`, and the claude child process gone (exited but
+the runner's `tokio::select!` over `child.wait()` never returned, so
+`StreamEvent::Finished` was never sent and the UI never learned).
+
+v1.7.1:
+
+- Platform-aware constant — `CLOCK_MONOTONIC = 6` on macOS, `= 1` on
+  other unixes.
+- Defensive fallback — if `clock_gettime` rejects our clock id on a
+  future platform we haven't enumerated, fall back to
+  `std::time::Instant`. Wrong semantics (Instant doesn't pause during
+  macOS sleep — boottime-ish) is a much cheaper failure mode than a
+  permanently-zero clock that silently disables the stall watcher.
+- Regression test — `stall::tests::now_ns_is_nonzero_and_monotonic`
+  asserts `now_ns() > 0` and monotonic so this exact class of bug
+  can't regress hidden.
+
+### Root-cause ownership
+
+The two pre-existing stall tests (`bump_resets_elapsed`,
+`crosses_threshold`) were failing on macOS dev machines before this
+release; v1.4–v1.7.0 releases shipped despite those failures because
+they were misdiagnosed as "flaky / wall-clock sensitive". They were
+actually the canary for the real bug. Sorry.
+
+### Tests
+
+- `cargo test -p cccplayer-harness --lib stall` — 3/3 pass (was 1/3
+  on macOS in v1.7.0).
+- `cargo test --workspace --lib` — 57/58 pass. The one remaining
+  failure is `workdir::tmp_blacklisted`, which is an environmental
+  flaky (dev machine has a `.key` file in `/tmp`) unrelated to v1.7.1.
+
+### Not in this release
+
+- Reducer-level watchdog ("no events for N × stall_threshold seconds
+  → force-pause with reason 'supervisor timeout'") as belt to the
+  stall-watcher suspenders. The current fix restores the suspender;
+  adding the belt is deferred to a later release.
+- Root-cause analysis of why `child.wait()` itself appears to have
+  stalled in the Hermes Linux case — without the stall watcher to
+  kick the child, there's nothing to observe. With v1.7.1 the stall
+  watcher will now fire at 10 minutes; if the underlying `wait()`
+  bug is still there, we'll see it surface cleanly as a
+  `TurnOutcome::Stalled` instead of a silent hang.
+
+---
+
 ## v1.7.0 · 2026-04-20
 
 Fixes a different-shape failure the v1.6 Hermes Linux session made

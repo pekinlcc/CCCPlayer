@@ -12,18 +12,35 @@ use std::time::Duration;
 
 /// A wall-clock-independent monotonic timestamp, in nanoseconds. Pauses
 /// while the system is asleep on Darwin (CLOCK_MONOTONIC) and on Linux.
-/// On Windows / tests we fall back to `Instant` which is close enough.
+///
+/// v1.7.1 fix: clock-id value differs across unix-likes. On Linux,
+/// `CLOCK_MONOTONIC` is **1**; on macOS (Darwin) it is **6**. v1.0–v1.7.0
+/// hard-coded the Linux value, so `clock_gettime` returned EINVAL on
+/// macOS, the caller silently fell back to a zeroed timespec, and every
+/// `now_ns()` returned 0 — causing `elapsed()` to always report zero and
+/// the stall watcher to never fire. See the Hermes Linux session that
+/// exposed it (169-minute no-event hang, round 17 REFINING).
 #[cfg(target_family = "unix")]
 pub fn now_ns() -> u128 {
     let mut ts = libc_ts_stub::Timespec::default();
-    unsafe {
-        libc_ts_stub::clock_gettime_monotonic(&mut ts);
+    let ok = unsafe { libc_ts_stub::clock_gettime_monotonic(&mut ts) };
+    if !ok {
+        // Defense in depth: if the kernel rejects our clock id anyway
+        // (future platform divergence), fall back to `Instant`. Wrong
+        // semantics on macOS (doesn't pause during sleep) is a much
+        // cheaper failure than a permanently-zero clock that disables
+        // the stall watcher entirely.
+        return instant_fallback_ns();
     }
     (ts.tv_sec as u128) * 1_000_000_000 + (ts.tv_nsec as u128)
 }
 
 #[cfg(not(target_family = "unix"))]
 pub fn now_ns() -> u128 {
+    instant_fallback_ns()
+}
+
+fn instant_fallback_ns() -> u128 {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
@@ -82,7 +99,13 @@ impl StallWatcher {
 #[cfg(target_family = "unix")]
 mod libc_ts_stub {
     // We avoid a full libc dep by declaring the small bits of clock_gettime
-    // that we need. CLOCK_MONOTONIC = 1 on Linux and macOS.
+    // that we need.
+    //
+    // Clock-id values differ across unix flavours — this was the v1.7.1
+    // bug. Linux `<bits/time.h>` has CLOCK_MONOTONIC = 1, while macOS
+    // `<sys/_types/_clockid_t.h>` (and the public `<time.h>`) has
+    // CLOCK_MONOTONIC = 6. Using the Linux value on macOS returns EINVAL
+    // and the watcher silently disables itself.
     #[repr(C)]
     #[derive(Default)]
     pub struct Timespec {
@@ -95,23 +118,29 @@ mod libc_ts_stub {
     extern "C" {
         fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
     }
+
+    #[cfg(target_os = "macos")]
+    pub const CLOCK_MONOTONIC: i32 = 6;
+
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     pub const CLOCK_MONOTONIC: i32 = 1;
 
-    /// Fills `ts` with the current CLOCK_MONOTONIC value. Panics only in the
-    /// pathological case that the kernel rejects CLOCK_MONOTONIC, which
-    /// indicates a platform we don't support.
+    /// Fills `ts` with the current CLOCK_MONOTONIC value. Returns `true`
+    /// on success, `false` on kernel rejection so the caller can fall back
+    /// to a monotonic-but-wrong-semantics source instead of silently
+    /// reading a zeroed timespec.
     ///
     /// # Safety
     /// The caller must provide a valid, writable Timespec pointer.
-    pub unsafe fn clock_gettime_monotonic(ts: *mut Timespec) {
+    pub unsafe fn clock_gettime_monotonic(ts: *mut Timespec) -> bool {
         let rc = clock_gettime(CLOCK_MONOTONIC, ts);
         if rc != 0 {
-            // If the syscall fails the pointed-to struct is uninitialized,
-            // so zero it so callers read predictable values.
             if !ts.is_null() {
                 *ts = Timespec::default();
             }
+            return false;
         }
+        true
     }
 }
 
@@ -134,5 +163,20 @@ mod tests {
         let w = StallWatcher::new(Duration::from_millis(10));
         std::thread::sleep(Duration::from_millis(25));
         assert!(w.is_stalled());
+    }
+
+    /// v1.7.1 regression: `now_ns()` must return a non-zero, monotonically
+    /// increasing value on every supported platform. Prior to v1.7.1 this
+    /// was silently zero on macOS (wrong CLOCK_MONOTONIC constant), and
+    /// the two tests above caught it only obliquely as "after < before
+    /// failed". This one says the quiet part out loud so the root cause
+    /// can't regress hidden.
+    #[test]
+    fn now_ns_is_nonzero_and_monotonic() {
+        let a = now_ns();
+        assert!(a > 0, "now_ns must be > 0 (clock-id wiring broken?); got {a}");
+        std::thread::sleep(Duration::from_millis(2));
+        let b = now_ns();
+        assert!(b > a, "now_ns must be monotonic; got a={a}, b={b}");
     }
 }

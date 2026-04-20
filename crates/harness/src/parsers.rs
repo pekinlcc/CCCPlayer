@@ -727,7 +727,7 @@ Make a Linux ISO
     }
 
     #[test]
-    fn hard_deliverables_section_at_EOF() {
+    fn hard_deliverables_section_at_eof() {
         let prd = "## Hard deliverables\n- item A\n- item B\n";
         assert_eq!(parse_hard_deliverables(prd).len(), 2);
     }
