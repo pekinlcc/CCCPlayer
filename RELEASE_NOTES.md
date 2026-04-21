@@ -1,5 +1,77 @@
 # CCCPlayer Release Notes
 
+## v1.7.4 · 2026-04-21
+
+Companion fix to v1.7.3. `is_auth_failure` had the same over-broad
+needle-list flaw `is_rate_limit` had — a classifier that scans the
+whole stdout/stderr for short English phrases and flips any turn to
+`AuthFailed` if one is found, even when the match came from the
+agent's content and not an actual CLI error.
+
+### Fixed — is_auth_failure no longer fires on prose about auth errors
+
+Observed in a Hermes Linux session at round 47: Claude's REFINING turn
+finished cleanly (`stop_reason: end_turn`, `terminal_reason: completed`,
+`fast_mode_state: off`), but its thinking field paraphrased the user's
+setup wizard scenarios with the line
+
+> "the service either failed to start due to network issues or an
+> **invalid API key**, or the 60-second timeout wasn't enough..."
+
+The classifier lower-cased the whole transcript and hit on
+`"invalid api key"` — one of the v1.7.3-era needles — so the turn
+flipped to `AuthFailed` and the session paused. Same mechanism as the
+v1.7.3 rate-limit false-positive, same-shape fix.
+
+v1.7.4 restricts the auth-failure needle list to phrases that **only
+appear in actual CLI / API error bodies**:
+
+| Kept | Dropped (too generic) |
+| --- | --- |
+| `"401 unauthorized"` (HTTP reason phrase — survives `HTTP/1.1` / `HTTP/2` prefix noise) | `"unauthorized"` (appears in code comments, OAuth discussions) |
+| `"status 401"` | `"unauthenticated"` |
+| `` "please run `claude login`" `` (CLI error verbatim) | `"not logged in"` (UI help text) |
+| `` "please run `codex login`" `` | `"please login"` (UI help text) |
+| `"authentication_error"` *new* (Anthropic API JSON error `type`) | `"invalid api key"` (agent prose — triggered the bug) |
+| `"invalid_api_key"` *new* (OpenAI API JSON error `code`) | `"api key not found"` (generic) |
+| `"invalid_authentication"` *new* (OpenAI API) | |
+
+The three new underscored tokens come straight from the vendor API
+error-response schemas. They never appear in English prose, so they
+add real-error coverage without reopening the false positive — same
+tactic as v1.7.3.
+
+### Added
+
+- 9 regression tests in `crates/harness/src/turn.rs::tests`:
+  - **Positive** (must fire): HTTP 401 response, Claude CLI "please
+    run `claude login`" message, Codex CLI equivalent, Anthropic API
+    `authentication_error` body, OpenAI API `invalid_api_key` code,
+    OpenAI `invalid_authentication` type.
+  - **Negative** (must NOT fire): a near-verbatim paraphrase of the
+    Hermes Linux thinking that triggered the original bug, common
+    UI-help text ("Please login to continue", "User is not logged
+    in"), and HTTP RFC-style prose about 403 vs 401.
+
+### Impact
+
+This bug has been present since v1.0. Any session whose goal or PRD
+discussed auth / login / API key handling could have been silently
+paused on any turn where the agent's content used one of the
+over-broad needles. Combined with v1.7.3, the two classifier
+tightenings should eliminate the whole family of "classifier fires
+on model content instead of CLI error" pauses.
+
+### Not in this release
+
+- `is_refusal` has the same architectural risk — it's a substring
+  matcher on phrases like "I can't help" / "I am unable to" which
+  can appear in agent content. It's gated by an additional
+  "`files_touched() == false`" check so the blast radius is
+  smaller, but deserves the same audit. Deferred.
+
+---
+
 ## v1.7.3 · 2026-04-20
 
 Fixes a rate-limit false positive that poisons any session whose goal

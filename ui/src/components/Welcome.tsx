@@ -295,7 +295,7 @@ export function Welcome(props: {
         <span>Workdir</span>
         <code>{workdir.trim() || '—'}</code>
         <span className="spacer" />
-        <span>v1.7.3</span>
+        <span>v1.7.4</span>
       </div>
       {goalConflict && (
         <GoalConflictModal
