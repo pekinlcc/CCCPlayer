@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CCCPlayer · Claude Code × Codex dual-agent loop for macOS</title>
+  <meta
+    name="description"
+    content="Set a local folder, describe a goal, hit ▶. Two AI coding agents (Claude Code + Codex) build, review, and iterate until done. macOS Apple Silicon. Zero telemetry."
+  />
+  <style>
+    :root {
+      --bg: #07070c;
+      --panel: #0f0f18;
+      --panel2: #14141f;
+      --chrome: #1a1a26;
+      --cyan: #00e5ff;
+      --magenta: #ff2fd6;
+      --lime: #baff29;
+      --amber: #ffb347;
+      --danger: #ff355a;
+      --dim: #6c6c86;
+      --ink: #d6d6ee;
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background:
+        radial-gradient(1200px 700px at 20% -10%, rgba(255, 47, 214, 0.08), transparent 60%),
+        radial-gradient(1000px 600px at 100% 110%, rgba(0, 229, 255, 0.08), transparent 60%),
+        var(--bg);
+      color: var(--ink);
+      font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+      font-size: 14px;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { color: var(--cyan); font-family: inherit; }
+
+    .wrap { max-width: 1160px; margin: 0 auto; padding: 0 28px; }
+
+    /* =================================================================
+     * NAV
+     * ================================================================= */
+    nav.topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(7, 7, 12, 0.85);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid #1a1a26;
+    }
+    nav.topbar .wrap {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      height: 52px;
+    }
+    .logo {
+      color: var(--lime);
+      font-weight: 700;
+      letter-spacing: 2.4px;
+      font-size: 13px;
+      text-shadow: 0 0 6px rgba(186, 255, 41, 0.45);
+    }
+    .logo .mark { color: var(--magenta); text-shadow: 0 0 6px rgba(255, 47, 214, 0.5); }
+    .ver-tag {
+      padding: 2px 8px;
+      border: 1px solid var(--cyan);
+      border-radius: 3px;
+      font-size: 10.5px;
+      letter-spacing: 1.4px;
+      color: var(--cyan);
+      text-shadow: 0 0 4px rgba(0, 229, 255, 0.4);
+    }
+    .nav-tag-line {
+      color: var(--dim);
+      font-size: 11px;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+    }
+    .nav-right {
+      margin-left: auto;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border: 1px solid var(--cyan);
+      border-radius: 3px;
+      background: transparent;
+      color: var(--cyan);
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 120ms, box-shadow 120ms;
+    }
+    .btn:hover {
+      background: rgba(0, 229, 255, 0.12);
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.35);
+      text-decoration: none;
+    }
+    .btn.primary {
+      border-color: var(--lime);
+      color: var(--lime);
+    }
+    .btn.primary:hover {
+      background: rgba(186, 255, 41, 0.12);
+      box-shadow: 0 0 10px rgba(186, 255, 41, 0.45);
+    }
+
+    /* =================================================================
+     * HERO
+     * ================================================================= */
+    .hero {
+      padding: 80px 0 60px;
+    }
+    .hero .wrap {
+      display: grid;
+      grid-template-columns: 1.05fr 1fr;
+      gap: 48px;
+      align-items: center;
+    }
+    .hero h1 {
+      font-size: 64px;
+      margin: 0 0 12px;
+      color: var(--magenta);
+      letter-spacing: 3px;
+      line-height: 1.05;
+      text-shadow: 0 0 14px rgba(255, 47, 214, 0.45);
+    }
+    .hero .sep {
+      font-size: 22px;
+      letter-spacing: 3px;
+      color: var(--dim);
+      margin: 0 0 18px;
+    }
+    .hero .sep .x { color: var(--magenta); padding: 0 10px; }
+    .hero .tagline {
+      font-size: 22px;
+      color: var(--lime);
+      margin: 16px 0 24px;
+      text-shadow: 0 0 8px rgba(186, 255, 41, 0.35);
+    }
+    .hero .tagline::before { content: "▶  "; color: var(--lime); }
+    .hero .sub {
+      color: var(--ink);
+      font-size: 15px;
+      margin: 0 0 28px;
+      max-width: 54ch;
+    }
+    .hero .cta {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .hero .cta .btn { padding: 12px 20px; font-size: 12px; }
+    .hero .quickfacts {
+      display: flex;
+      gap: 22px;
+      flex-wrap: wrap;
+      color: var(--dim);
+      font-size: 11px;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+      margin-top: 14px;
+    }
+    .hero .quickfacts span::before {
+      content: "●  ";
+      color: var(--cyan);
+      text-shadow: 0 0 4px var(--cyan);
+    }
+
+    /* The hero right column: a player-chrome frame around the idle screenshot */
+    .hero-shell {
+      position: relative;
+      background: linear-gradient(180deg, #1e1e2a 0%, #0a0a12 100%);
+      border: 1px solid #30304a;
+      border-top-color: #4a4a66;
+      border-left-color: #3a3a52;
+      border-radius: 6px;
+      box-shadow:
+        0 0 0 1px rgba(0, 0, 0, 0.6) inset,
+        0 20px 60px rgba(0, 0, 0, 0.7),
+        0 0 80px rgba(255, 47, 214, 0.08);
+      overflow: hidden;
+    }
+    .hero-shell .titlebar {
+      height: 24px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      background: linear-gradient(180deg, #3a3a52, #1a1a26);
+      border-bottom: 1px solid #05050a;
+      font-size: 10.5px;
+      letter-spacing: 1.2px;
+      color: var(--dim);
+    }
+    .hero-shell .titlebar .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+    }
+    .hero-shell .titlebar .red    { background: #ff5f56; }
+    .hero-shell .titlebar .yellow { background: #ffbd2e; }
+    .hero-shell .titlebar .green  { background: #27c93f; }
+    .hero-shell img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    /* =================================================================
+     * TAGLINE BAND
+     * ================================================================= */
+    .band {
+      border-top: 1px solid #1a1a26;
+      border-bottom: 1px solid #1a1a26;
+      background: rgba(15, 15, 24, 0.6);
+      padding: 14px 0;
+    }
+    .band .wrap {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 20px;
+      font-size: 11px;
+      letter-spacing: 1.6px;
+      color: var(--dim);
+      text-transform: uppercase;
+    }
+    .band .bit .val {
+      color: var(--ink);
+      margin-left: 8px;
+    }
+    .band .bit.cyan .val    { color: var(--cyan); }
+    .band .bit.magenta .val { color: var(--magenta); }
+    .band .bit.lime .val    { color: var(--lime); }
+    .band .bit.amber .val   { color: var(--amber); }
+
+    /* =================================================================
+     * SECTION COMMON
+     * ================================================================= */
+    section { padding: 80px 0; }
+    section h2 {
+      font-size: 28px;
+      letter-spacing: 2px;
+      color: var(--cyan);
+      margin: 0 0 8px;
+      text-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+    }
+    section h2 .lead { color: var(--dim); font-weight: 400; font-size: 14px; }
+    section .section-sub {
+      color: var(--dim);
+      max-width: 68ch;
+      margin: 0 0 40px;
+    }
+
+    /* =================================================================
+     * WHAT-IS-THIS
+     * ================================================================= */
+    .intro-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 36px;
+      align-items: start;
+    }
+    .intro-grid p { margin: 0 0 16px; }
+    .intro-grid p strong { color: var(--ink); }
+    .intro-grid .claude { color: var(--cyan); font-weight: 700; }
+    .intro-grid .codex  { color: var(--magenta); font-weight: 700; }
+    .intro-card {
+      border: 1px solid #1a1a26;
+      border-left: 2px solid var(--magenta);
+      background: var(--panel);
+      padding: 20px 22px;
+      border-radius: 3px;
+    }
+    .intro-card h4 {
+      margin: 0 0 8px;
+      font-size: 11px;
+      letter-spacing: 1.6px;
+      text-transform: uppercase;
+      color: var(--magenta);
+    }
+    .intro-card .contract {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px 14px;
+      font-size: 13px;
+    }
+    .intro-card .contract .k { color: var(--lime); }
+    .intro-card .contract .v { color: var(--ink); }
+
+    /* =================================================================
+     * FEATURES GRID
+     * ================================================================= */
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+    .feature {
+      position: relative;
+      border: 1px solid #1a1a26;
+      background: var(--panel);
+      padding: 22px 22px 24px;
+      border-radius: 4px;
+      transition: border-color 160ms, box-shadow 160ms, transform 160ms;
+    }
+    .feature:hover {
+      border-color: #2a2a40;
+      box-shadow: 0 0 24px rgba(0, 229, 255, 0.08);
+      transform: translateY(-2px);
+    }
+    .feature .pill {
+      display: inline-block;
+      font-size: 10px;
+      letter-spacing: 1.4px;
+      padding: 2px 8px;
+      border: 1px solid;
+      border-radius: 3px;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+    }
+    .feature.a .pill { color: var(--cyan);    border-color: var(--cyan); }
+    .feature.b .pill { color: var(--magenta); border-color: var(--magenta); }
+    .feature.c .pill { color: var(--lime);    border-color: var(--lime); }
+    .feature.d .pill { color: var(--amber);   border-color: var(--amber); }
+    .feature h3 {
+      margin: 0 0 10px;
+      color: var(--ink);
+      font-size: 15px;
+      letter-spacing: 0.5px;
+    }
+    .feature p {
+      margin: 0;
+      color: var(--dim);
+      font-size: 13px;
+    }
+
+    /* =================================================================
+     * HOW-TO-USE (three steps)
+     * ================================================================= */
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+    .step {
+      border: 1px solid #1a1a26;
+      background: var(--panel);
+      padding: 24px 24px 28px;
+      border-radius: 4px;
+      position: relative;
+    }
+    .step .n {
+      font-size: 56px;
+      line-height: 1;
+      color: var(--magenta);
+      opacity: 0.55;
+      font-weight: 700;
+      letter-spacing: -2px;
+      margin-bottom: 10px;
+      text-shadow: 0 0 10px rgba(255, 47, 214, 0.3);
+    }
+    .step h3 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      color: var(--lime);
+      letter-spacing: 0.5px;
+      text-shadow: 0 0 6px rgba(186, 255, 41, 0.25);
+    }
+    .step p {
+      margin: 0;
+      color: var(--ink);
+      font-size: 13px;
+    }
+    .step code { color: var(--cyan); }
+
+    /* =================================================================
+     * SCREENSHOT GALLERY
+     * ================================================================= */
+    .shots {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 28px;
+    }
+    .shot {
+      border: 1px solid #1a1a26;
+      border-top-color: #3a3a52;
+      border-left-color: #2a2a40;
+      background: var(--panel);
+      border-radius: 4px;
+      overflow: hidden;
+      box-shadow:
+        0 0 0 1px rgba(0, 0, 0, 0.6) inset,
+        0 12px 32px rgba(0, 0, 0, 0.5);
+    }
+    .shot .shot-cap {
+      padding: 10px 14px;
+      background: linear-gradient(180deg, #2a2a3e, #14141f);
+      border-bottom: 1px solid #05050a;
+      font-size: 10.5px;
+      letter-spacing: 1.4px;
+      color: var(--dim);
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+    }
+    .shot .shot-cap .state.run  { color: var(--lime); }
+    .shot .shot-cap .state.done { color: var(--cyan); }
+    .shot img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    /* =================================================================
+     * DOWNLOAD
+     * ================================================================= */
+    .pkg-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin-bottom: 40px;
+    }
+    .pkg {
+      border: 1px solid #1a1a26;
+      background: var(--panel);
+      padding: 22px 22px 22px;
+      border-radius: 4px;
+      display: flex;
+      flex-direction: column;
+    }
+    .pkg.rec {
+      border-color: var(--lime);
+      box-shadow: 0 0 20px rgba(186, 255, 41, 0.1);
+    }
+    .pkg .rec-flag {
+      font-size: 10px;
+      letter-spacing: 1.6px;
+      color: var(--lime);
+      margin-bottom: 10px;
+      text-shadow: 0 0 4px rgba(186, 255, 41, 0.4);
+    }
+    .pkg h4 {
+      margin: 0 0 6px;
+      font-size: 15px;
+      color: var(--ink);
+    }
+    .pkg .size {
+      color: var(--dim);
+      font-size: 11px;
+      letter-spacing: 1.2px;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+    }
+    .pkg p {
+      color: var(--dim);
+      font-size: 13px;
+      margin: 0 0 18px;
+      flex: 1;
+    }
+    .pkg .btn { align-self: flex-start; }
+
+    .prereq {
+      border: 1px solid #1a1a26;
+      background: var(--panel);
+      border-radius: 4px;
+      padding: 24px 28px;
+    }
+    .prereq h3 {
+      margin: 0 0 14px;
+      color: var(--amber);
+      font-size: 13px;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+    }
+    .prereq p {
+      margin: 0 0 14px;
+      color: var(--ink);
+      font-size: 13px;
+    }
+    .prereq pre {
+      margin: 0;
+      padding: 14px 16px;
+      background: #07070c;
+      border: 1px solid #2a2a40;
+      border-radius: 3px;
+      font-size: 12.5px;
+      color: var(--ink);
+      overflow-x: auto;
+    }
+    .prereq pre .c { color: var(--dim); }
+    .prereq pre .k { color: var(--lime); }
+
+    /* =================================================================
+     * FOOTER
+     * ================================================================= */
+    footer {
+      margin-top: 40px;
+      border-top: 1px solid #1a1a26;
+      padding: 40px 0 60px;
+    }
+    footer .wrap {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      flex-wrap: wrap;
+      font-size: 11px;
+      letter-spacing: 1.2px;
+      color: var(--dim);
+      text-transform: uppercase;
+    }
+    footer a { color: var(--dim); }
+    footer a:hover { color: var(--cyan); }
+
+    /* =================================================================
+     * RESPONSIVE
+     * ================================================================= */
+    @media (max-width: 900px) {
+      .hero .wrap { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 44px; }
+      .hero .tagline { font-size: 18px; }
+      .intro-grid { grid-template-columns: 1fr; }
+      .features-grid { grid-template-columns: 1fr; }
+      .steps { grid-template-columns: 1fr; }
+      .shots { grid-template-columns: 1fr; }
+      .pkg-grid { grid-template-columns: 1fr; }
+      section { padding: 56px 0; }
+      .hero { padding: 44px 0 28px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- =================================================================
+     NAV
+     ================================================================= -->
+  <nav class="topbar">
+    <div class="wrap">
+      <span class="logo"><span class="mark">▶</span> CCCPLAYER</span>
+      <span class="ver-tag">v1.7.4</span>
+      <span class="nav-tag-line">Claude Code × Codex · macOS arm64</span>
+      <span class="nav-right">
+        <a href="https://github.com/pekinlcc/CCCPlayer" class="btn">GitHub ↗</a>
+        <a href="#download" class="btn primary">▶ Download</a>
+      </span>
+    </div>
+  </nav>
+
+  <!-- =================================================================
+     HERO
+     ================================================================= -->
+  <section class="hero">
+    <div class="wrap">
+      <div>
+        <h1>CCCPlayer</h1>
+        <div class="sep">CLAUDE · CODE <span class="x">×</span> CODEX</div>
+        <p class="tagline">Burn compute, not your time.</p>
+        <p class="sub">
+          A macOS desktop app that hands a local folder to two AI coding agents and
+          walks away until the work is done. Claude plans and implements, Codex
+          reviews. They iterate over a shared <code>PRD.md</code> and versioned
+          <code>codex_review_v{N}.md</code> files until both agree the goal is met.
+          Everything runs locally. Your tokens, your code, your machine.
+        </p>
+        <div class="cta">
+          <a href="#download" class="btn primary">▶ Download for macOS</a>
+          <a href="https://github.com/pekinlcc/CCCPlayer" class="btn">View source ↗</a>
+        </div>
+        <div class="quickfacts">
+          <span>macOS 13+</span>
+          <span>Apple Silicon</span>
+          <span>Ad-hoc signed</span>
+          <span>Zero telemetry</span>
+          <span>MIT license</span>
+        </div>
+      </div>
+      <div class="hero-shell">
+        <div class="titlebar">
+          <span class="dot red"></span>
+          <span class="dot yellow"></span>
+          <span class="dot green"></span>
+          <span style="flex:1"></span>
+          <span>CCCPLAYER · idle</span>
+        </div>
+        <img src="../../docs/screenshots/idle.png" alt="CCCPlayer idle screen — cyberpunk UI showing folder and goal fields" />
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+     TAGLINE BAND
+     ================================================================= -->
+  <div class="band">
+    <div class="wrap">
+      <span class="bit cyan">Loop <span class="val">Claude → Codex → Claude …</span></span>
+      <span class="bit magenta">Contract <span class="val">shared PRD + versioned reviews</span></span>
+      <span class="bit lime">Exit <span class="val">both agents agree done=true</span></span>
+      <span class="bit amber">Self-healing <span class="val">rate-limit auto-resume · stagnation gate</span></span>
+    </div>
+  </div>
+
+  <!-- =================================================================
+     WHAT IS THIS
+     ================================================================= -->
+  <section class="what-is-this">
+    <div class="wrap">
+      <h2>What is this <span class="lead">· a player for two code agents</span></h2>
+      <p class="section-sub">
+        The name is a nod to Winamp: this is a player for code agents. Triangle ▶
+        Play, double-bar ⏸ Pause, square ■ Stop. Set a local folder, describe a goal
+        in plain English, press Play, walk away.
+      </p>
+      <div class="intro-grid">
+        <div>
+          <p>
+            <strong>Set a goal.</strong> One or two paragraphs in plain English —
+            e.g. <em>"pixel-perfect clone of some.app, but drop the paid features"</em>
+            or <em>"add CSV import and round out integration tests"</em>.
+          </p>
+          <p>
+            <strong>Press ▶.</strong> The <span class="claude">Claude Code CLI</span> plans
+            and implements against the current state of your folder; the
+            <span class="codex">Codex CLI</span> reviews the result and writes
+            <code>codex_review_v{N}.md</code>.
+          </p>
+          <p>
+            <strong>Walk away.</strong> Close the window — the loop keeps running
+            in the background. Hit Cmd+Q to actually exit. CCCPlayer iterates
+            Plan → Implement → Review → Refine → GoalCheck until both agents
+            agree the goal is met.
+          </p>
+        </div>
+        <div class="intro-card">
+          <h4>The session contract</h4>
+          <div class="contract">
+            <span class="k">GOAL.md</span>       <span class="v">immutable benchmark (agents can't edit)</span>
+            <span class="k">PRD.md</span>        <span class="v">living spec Claude revises round by round</span>
+            <span class="k">codex_review_v{N}.md</span> <span class="v">Codex's structured review + Claude's response</span>
+            <span class="k">.cccplayer/</span>   <span class="v">session state · event log · round snapshots</span>
+            <span class="k">DONE</span>          <span class="v">both agents report done=true AND hard deliverables present</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+     CORE FEATURES
+     ================================================================= -->
+  <section class="features">
+    <div class="wrap">
+      <h2>Core capabilities <span class="lead">· what it actually guarantees</span></h2>
+      <p class="section-sub">
+        Features that are load-bearing for unsupervised long runs — the ones you notice
+        when you leave a session overnight and come back to a green DONE banner.
+      </p>
+      <div class="features-grid">
+        <div class="feature a">
+          <span class="pill">Single-writer state</span>
+          <h3>Two agents, one state machine</h3>
+          <p>
+            Every transition flows through a single Tokio reducer. The UI never
+            sees torn state; the two agents never race each other. Phase LEDs
+            march from <code>PLANNING</code> to <code>GOAL_CHECK</code>.
+          </p>
+        </div>
+
+        <div class="feature b">
+          <span class="pill">GOAL.md sacred</span>
+          <h3>One invariant, everything else is evidence</h3>
+          <p>
+            Your goal is locked; agents literally cannot edit it. Everything
+            else — PRD milestones, sub-goals, past decisions — is revisable
+            evidence. Every phase anchors back to GOAL.md.
+          </p>
+        </div>
+
+        <div class="feature c">
+          <span class="pill">Disagreement protocol</span>
+          <h3>Accept · partial · reject · shelve</h3>
+          <p>
+            When Claude and Codex disagree, the refiner resolves it explicitly
+            with a <code>goal_impact</code> line. Shelved items live verbatim in
+            PRD so agent forgetfulness can't drop them silently.
+          </p>
+        </div>
+
+        <div class="feature a">
+          <span class="pill">Hard deliverables gate</span>
+          <h3>The DONE guard</h3>
+          <p>
+            Planning extracts the goal's concrete required outputs into
+            <code>## Hard deliverables</code>. Shelving one is forbidden;
+            if the orchestrator finds one in missing[]/shelved[] at goal-check,
+            <code>done=true</code> is overridden. No rationalized DONE.
+          </p>
+        </div>
+
+        <div class="feature d">
+          <span class="pill">Self-healing</span>
+          <h3>Rate-limit auto-resume · stagnation gate</h3>
+          <p>
+            Quota exhausted → pause with <code>retry_at</code>, resume when the
+            window rolls over. Stuck for 5 rounds with no new angle from either
+            agent → stop cleanly with a plain-English reason.
+          </p>
+        </div>
+
+        <div class="feature b">
+          <span class="pill">Rollback</span>
+          <h3>Per-round tar.zst snapshots</h3>
+          <p>
+            Every round start writes <code>.cccplayer/snapshots/round-N.tar.zst</code>.
+            <code>round-00</code> is your untouched original and is never
+            deleted. Any session is rewindable to any round.
+          </p>
+        </div>
+
+        <div class="feature c">
+          <span class="pill">CLI autodiscovery</span>
+          <h3>Finds claude & codex anywhere</h3>
+          <p>
+            Homebrew, nvm, fnm, asdf, volta, <code>n</code>, cargo-bin. Falls
+            back to a 5-second login-shell probe so whatever PATH your Terminal
+            sees, CCCPlayer sees too. Finder-launched apps still work.
+          </p>
+        </div>
+
+        <div class="feature a">
+          <span class="pill">Session report</span>
+          <h3>Rich end-of-session banner</h3>
+          <p>
+            DONE / STOPPED / ERRORED with duration, rounds, per-agent tokens,
+            both agents' final goal checks side-by-side, plain-English exit
+            reason, chronological highlights, artifact paths.
+          </p>
+        </div>
+
+        <div class="feature d">
+          <span class="pill">Zero telemetry</span>
+          <h3>Local, yours, silent</h3>
+          <p>
+            The app itself makes zero network calls. Everything uses your own
+            Claude + Codex accounts, your own tokens, your own workdir. Not a
+            proxy, not a service.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+     HOW TO USE
+     ================================================================= -->
+  <section class="how-to">
+    <div class="wrap">
+      <h2>Three steps <span class="lead">· set goal, hit Play, walk away</span></h2>
+      <div class="steps">
+        <div class="step">
+          <div class="n">01</div>
+          <h3>Pick a folder</h3>
+          <p>
+            Empty directory or an existing project — both work. CCCPlayer surveys
+            what's there and builds on top, never wipes. Home dir and system
+            paths are refused; <code>.cccplayer/</code> is auto-added to
+            <code>.gitignore</code>.
+          </p>
+        </div>
+        <div class="step">
+          <div class="n">02</div>
+          <h3>Describe your goal</h3>
+          <p>
+            One or two paragraphs in plain English. If the folder already has
+            <code>GOAL.md</code>, CCCPlayer loads it so you can see it and edit
+            on top. Both preflight rows green? Hit the lime ▶ Play button.
+          </p>
+        </div>
+        <div class="step">
+          <div class="n">03</div>
+          <h3>Close the window</h3>
+          <p>
+            Close ≠ quit — the loop keeps running in the background. App Nap is
+            suppressed so hidden windows don't get throttled. Come back later,
+            look at the DONE banner, rewind to any round if you want to branch.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+     SCREENSHOT GALLERY
+     ================================================================= -->
+  <section class="screenshots">
+    <div class="wrap">
+      <h2>What it looks like <span class="lead">· running and done</span></h2>
+      <p class="section-sub">
+        Cyberpunk neon on near-black chrome. Cyan/magenta/lime color-coded so you
+        can glance from 20 feet away and know which agent is working and whether
+        the session is stuck.
+      </p>
+      <div class="shots">
+        <div class="shot">
+          <div class="shot-cap">
+            <span>Running — Claude in implementing phase</span>
+            <span class="state run">● RUN</span>
+          </div>
+          <img src="../../docs/screenshots/running.jpeg" alt="CCCPlayer running screen — Phase LEDs, Progress panel, Timeline, Raw stream" />
+        </div>
+        <div class="shot">
+          <div class="shot-cap">
+            <span>Done — session report</span>
+            <span class="state done">✓ DONE</span>
+          </div>
+          <img src="../../docs/screenshots/result.jpeg" alt="CCCPlayer done screen — session report with duration, tokens, goal checks, highlights, artifacts" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+     DOWNLOAD
+     ================================================================= -->
+  <section id="download">
+    <div class="wrap">
+      <h2>Download <span class="lead">· Apple Silicon · ad-hoc signed</span></h2>
+      <p class="section-sub">
+        Not notarized — no paid Apple Developer account behind the release. First
+        launch triggers Gatekeeper; <code>install.command</code> handles the
+        <code>xattr -cr</code> for you. Intel builds: build from source (see README).
+      </p>
+
+      <div class="pkg-grid">
+        <div class="pkg rec">
+          <div class="rec-flag">▶ RECOMMENDED</div>
+          <h4>CCCPlayer-1.7.4-arm64-install.zip</h4>
+          <div class="size">~4.5 MB</div>
+          <p>
+            Unzip, right-click <code>install.command</code> → Open (clears the
+            Gatekeeper warning on first run). Script copies to
+            <code>/Applications</code> and launches.
+          </p>
+          <a href="https://github.com/pekinlcc/CCCPlayer/releases/latest" class="btn primary">▶ Get install.zip</a>
+        </div>
+
+        <div class="pkg">
+          <div class="rec-flag" style="visibility:hidden">·</div>
+          <h4>CCCPlayer-1.7.4-arm64.dmg</h4>
+          <div class="size">~5.7 MB</div>
+          <p>
+            Traditional macOS install: mount DMG, drag into
+            <code>/Applications</code>, then <code>xattr -cr
+            /Applications/CCCPlayer.app</code> in Terminal before first open.
+          </p>
+          <a href="https://github.com/pekinlcc/CCCPlayer/releases/latest" class="btn">Get .dmg</a>
+        </div>
+
+        <div class="pkg">
+          <div class="rec-flag" style="visibility:hidden">·</div>
+          <h4>CCCPlayer-1.7.4-arm64.app.tar.gz</h4>
+          <div class="size">~4.5 MB</div>
+          <p>
+            Just the <code>.app</code> bundle — for developers, CI, and anyone
+            who wants to script the install.
+          </p>
+          <a href="https://github.com/pekinlcc/CCCPlayer/releases/latest" class="btn">Get .app.tar.gz</a>
+        </div>
+      </div>
+
+      <div class="prereq">
+        <h3>Prerequisites</h3>
+        <p>
+          You need the <span style="color:var(--cyan);">Claude Code CLI</span> and
+          <span style="color:var(--magenta);">Codex CLI</span> both installed and
+          logged in <strong>inside your Terminal</strong>. CCCPlayer uses YOUR
+          accounts — it's a harness, not a proxy.
+        </p>
+<pre><span class="c"># Claude Code CLI (Anthropic)</span>
+<span class="c"># Install per https://docs.anthropic.com/en/docs/claude-code</span>
+<span class="k">claude</span> --version
+
+<span class="c"># Codex CLI (OpenAI, via npm)</span>
+<span class="k">npm</span> i -g @openai/codex
+<span class="k">codex</span> --version
+<span class="k">codex</span> login</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+     FOOTER
+     ================================================================= -->
+  <footer>
+    <div class="wrap">
+      <span>© 2026 · CCCPlayer · MIT License</span>
+      <span>
+        <a href="https://github.com/pekinlcc/CCCPlayer">github.com/pekinlcc/CCCPlayer</a>
+        <span style="padding: 0 12px; color: #2a2a40">|</span>
+        <a href="https://github.com/pekinlcc/CCCPlayer/releases">Releases</a>
+        <span style="padding: 0 12px; color: #2a2a40">|</span>
+        <a href="https://github.com/pekinlcc/CCCPlayer/blob/main/README.md">README</a>
+      </span>
+      <span>built with ▶ and cyan/magenta/lime</span>
+    </div>
+  </footer>
+
+</body>
+</html>
