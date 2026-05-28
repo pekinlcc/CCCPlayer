@@ -65,33 +65,82 @@ pub fn extract_claude_text(stdout: &str) -> String {
 
 /// A very tolerant JSON extractor: finds the first fenced ```json block (or
 /// bare JSON object) and parses it. See PRD §16.3.
+///
+/// v1.7.5 fix per AUDIT.md #1: the previous implementation tracked brace
+/// depth with a naive counter that didn't understand JSON string literals.
+/// If an agent wrote `}` inside a quoted string (common: markdown snippets,
+/// shell fragments, json-in-json), the counter zeroed at the wrong place
+/// and the slice handed to `serde_json::from_str` was truncated or
+/// over-extended → parse failure → `output_malformed` → retry-once →
+/// ERRORED. The bug applied to BOTH paths (fenced regex used lazy
+/// `\{.*?\}` which has the same off-by-quote issue).
+///
+/// New strategy: walk the input character by character with a tiny string-
+/// aware brace tracker. This correctly handles `\"` escapes and ignores
+/// braces inside string literals.
 pub fn extract_json_block(text: &str) -> Option<serde_json::Value> {
-    // Try fenced code block first.
-    let fenced = Regex::new(r"(?s)```(?:json)?\s*(\{.*?\})\s*```").unwrap();
-    if let Some(cap) = fenced.captures(text) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cap[1]) {
-            return Some(v);
+    // Phase 1: locate a ```json (or bare ```) fence and search inside it.
+    let fence_re = Regex::new(r"```(?:json)?\s*\n?").unwrap();
+    let mut search_starts = Vec::new();
+    for m in fence_re.find_iter(text) {
+        search_starts.push(m.end());
+    }
+    // Always also try the whole text as a fallback search root.
+    search_starts.push(0);
+
+    for start_at in search_starts {
+        if let Some((s, e)) = locate_top_level_object(&text[start_at..]) {
+            let slice = &text[start_at + s..start_at + e];
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(slice) {
+                return Some(v);
+            }
         }
     }
-    // Fall back to any JSON-looking object.
-    if let Some(start) = text.find('{') {
-        let mut depth = 0i32;
-        for (i, c) in text[start..].char_indices() {
+    None
+}
+
+/// Walk `text` looking for the first balanced `{ ... }` object, respecting
+/// JSON string literals and `\"` escapes. Returns `(start, end_exclusive)`
+/// byte offsets into `text`. Stops at the first balanced object; does not
+/// try to find the LARGEST object.
+fn locate_top_level_object(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    // Skip to first '{'.
+    while i < bytes.len() && bytes[i] != b'{' {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let start = i;
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == b'\\' {
+                escape = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else {
             match c {
-                '{' => depth += 1,
-                '}' => {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
                     depth -= 1;
                     if depth == 0 {
-                        let slice = &text[start..start + i + 1];
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(slice) {
-                            return Some(v);
-                        }
-                        break;
+                        return Some((start, i + 1));
                     }
                 }
                 _ => {}
             }
         }
+        i += 1;
     }
     None
 }
@@ -736,5 +785,45 @@ Make a Linux ISO
     fn hard_deliverables_case_insensitive_heading() {
         let prd = "## HARD DELIVERABLES\n- item A\n";
         assert_eq!(parse_hard_deliverables(prd).len(), 1);
+    }
+
+    // ----- v1.7.5 regression: string-aware brace tracking ---------------------
+    // Before v1.7.5 the brace counter in extract_json_block treated every
+    // '}' the same, including ones inside string literals. Agents writing
+    // `}` in a `rationale` or as part of a code snippet inside `missing`
+    // would silently produce unparseable output — failures showed up as
+    // `output_malformed` → ERRORED.
+
+    #[test]
+    fn goal_check_with_closing_brace_inside_rationale_string() {
+        // The rationale contains a literal `}` (e.g. agent quoting a
+        // template). Old parser truncated at the first unmatched `}` →
+        // `serde_json::from_str` failed. New parser should ignore it.
+        let text = r#"{"done":false,"missing":["fix the } in line 42"],"next_state":"IMPLEMENTING","rationale":"closing brace `}` inside a template"}"#;
+        let g = parse_goal_check(text).expect("rationale with `}` must parse");
+        assert!(!g.done);
+        assert_eq!(g.missing, vec!["fix the } in line 42"]);
+        assert!(g.rationale.contains('}'));
+    }
+
+    #[test]
+    fn goal_check_with_escaped_quote_inside_string() {
+        // `\"` escape sequence inside a string used to be safe because we
+        // never tracked string-mode at all; the rewrite must keep this
+        // working.
+        let text = r#"{"done":true,"missing":[],"next_state":"DONE","rationale":"agent said \"all good\""}"#;
+        let g = parse_goal_check(text).expect("escaped quote must parse");
+        assert!(g.done);
+        assert!(g.rationale.contains('"'));
+    }
+
+    #[test]
+    fn extract_json_block_skips_preamble_with_braces() {
+        // Agents sometimes prefix their JSON output with markdown that
+        // contains stray `{` / `}` (e.g. JS code samples). The extractor
+        // must find the first BALANCED object, not the first `{`.
+        let text = "Here is some code: `if (x) { y; }` and now the answer:\n```json\n{\"done\":true,\"missing\":[],\"next_state\":\"DONE\",\"rationale\":\"x\"}\n```";
+        let g = parse_goal_check(text).expect("must skip code-sample braces");
+        assert!(g.done);
     }
 }

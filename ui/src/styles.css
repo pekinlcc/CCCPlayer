@@ -320,6 +320,27 @@ html, body, #root {
 .safety.strong-warn { border-color: rgba(255, 179, 71, 0.55); background: rgba(255, 179, 71, 0.13); color: var(--amber); }
 .safety.blocked { border-color: rgba(255, 53, 90, 0.55); background: rgba(255, 53, 90, 0.12); color: var(--danger); }
 
+/* v1.7.5 (AUDIT.md #8): informational "you're reusing this folder" banner.
+   Uses cyan (not amber) because it's informational, not a warning. */
+.reuse-banner {
+  margin-top: 10px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 229, 255, 0.35);
+  background: rgba(0, 229, 255, 0.06);
+  color: var(--ink);
+}
+.reuse-banner strong {
+  color: var(--cyan);
+  text-shadow: 0 0 5px rgba(0, 229, 255, 0.4);
+  margin-right: 4px;
+}
+.reuse-banner code {
+  color: var(--cyan);
+  text-shadow: 0 0 4px rgba(0, 229, 255, 0.3);
+}
+
 /* --- phase LED row --- */
 .phase-row {
   display: flex;
@@ -755,6 +776,11 @@ html, body, #root {
 .session-report .artifacts {
   margin-top: 14px;
 }
+.session-report .artifacts-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
 .session-report .artifacts-head .lbl {
   font-size: 10.5px;
   letter-spacing: 1.6px;
@@ -762,6 +788,40 @@ html, body, #root {
   color: var(--cyan);
   text-shadow: 0 0 5px rgba(0, 229, 255, 0.4);
   font-weight: 700;
+}
+.session-report .artifacts-head .dim {
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--dim);
+}
+/* v1.7.5: click-to-reveal artifact paths (AUDIT.md #7). The whole
+   `<code>` becomes a button; we strip the button chrome and lean on the
+   underline + hover glow to communicate clickability. */
+.session-report .artifacts .art-label {
+  color: var(--dim);
+  margin-right: 4px;
+}
+.session-report .artifacts .art-path {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.session-report .artifacts .art-path code {
+  cursor: pointer;
+  border-bottom: 1px dashed transparent;
+  transition: border-color 120ms ease, text-shadow 120ms ease;
+}
+.session-report .artifacts .art-path:hover code,
+.session-report .artifacts .art-path:focus-visible code {
+  border-bottom-color: var(--cyan);
+  text-shadow: 0 0 8px rgba(0, 229, 255, 0.7);
+}
+.session-report .artifacts .art-path:focus-visible {
+  outline: 1px dotted var(--cyan);
+  outline-offset: 2px;
 }
 .session-report .artifacts ul {
   list-style: none;
@@ -1033,6 +1093,33 @@ html, body, #root {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-top: 4px;
+}
+
+/* v1.7.5: Stop confirmation modal — 3-column stat strip showing what's
+   about to be abandoned. Visual cousin of session-report's `.kv-grid`. */
+.stop-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin: 14px 0 10px;
+  padding: 10px 12px;
+  background: rgba(255, 53, 90, 0.05);
+  border: 1px solid rgba(255, 53, 90, 0.25);
+  border-radius: 4px;
+}
+.stop-stat { display: flex; flex-direction: column; gap: 4px; }
+.stop-stat .lbl {
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.stop-stat .big {
+  color: var(--amber);
+  text-shadow: 0 0 6px rgba(255, 179, 71, 0.4);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 .goal-col-title {

@@ -93,3 +93,118 @@ implementation location and a status. Three statuses:
 - `usage_is_tracked_per_session` asserts `usage.json` accumulates tokens
   for both agents across a session, verifying §16.7.
 - `npm run build` produces the React bundle; `npm run typecheck` clean.
+
+---
+
+# v1.7.5 audit pass — code quality & UX polish
+
+A targeted re-audit of the v1.7.4 codebase (two parallel Explore agents
+plus manual verification) surfaced nine concrete improvement items; this
+section lists the issues by number so the in-code `// AUDIT.md #N`
+references resolve. Five items were skipped intentionally (see "Out of
+scope" at the bottom).
+
+| # | Category | Title | Status |
+| --- | --- | --- | --- |
+| 1 | Code · bug | `extract_json_block` not string-quote-aware | Fixed |
+| 2 | UX | Token cost label | Out of scope (subscription users) |
+| 3 | UX | Stop button needs confirmation | Fixed |
+| 4 | Code · correctness | `atomic_write` missing parent-dir fsync | Fixed |
+| 5 | UX | PAUSED Resume affordance hidden | Fixed |
+| 6 | UX | Preflight failure messaging not granular | Fixed |
+| 7 | UX | Artifact paths in session report not clickable | Fixed |
+| 8 | UX | "New session (same folder)" silent PRD reuse | Fixed |
+| 9 | Code | Pause during parallel GoalCheck waits both turns | Fixed |
+
+## #1 — `extract_json_block` not string-quote-aware
+
+`crates/harness/src/parsers.rs:68`. Brace-depth counter ignored JSON
+string literals; a `}` inside `"missing"` or `"rationale"` truncated the
+parse and surfaced as `output_malformed` → retry → ERRORED. Fixed by
+walking the input with a small string-aware tracker
+(`locate_top_level_object`) that respects `"` enter/exit and `\"`
+escapes. Three new regression tests cover `}` inside rationale, `\"`
+escapes, and skipping pre-JSON code samples with stray braces.
+
+## #3 — Stop confirmation modal
+
+`ui/src/components/RunningView.tsx:65`. Stop was a single click → instant
+ABANDONED, no opportunity to reconsider on a long-running session.
+Replaced the inline click handler with a confirmation modal showing
+Round / Elapsed / Total tokens about to be abandoned, plus a note that
+snapshots remain rewindable. Two buttons: "Keep running" (default) and
+"Stop and abandon" (danger).
+
+## #4 — Atomic-write parent fsync
+
+`crates/core/src/persistence.rs:15`. POSIX requires `fsync` on the
+parent directory after `rename` so the new dir entry is durable, not
+just the inode contents. macOS APFS is forgiving in practice but not
+specified to be. Added a best-effort `File::open(parent).sync_all()`
+after the rename; failures are swallowed so the happy path keeps working
+on filesystems that reject directory fsync.
+
+## #5 — PAUSED Resume affordance
+
+`ui/src/components/RunningView.tsx`. When rate-limited and auto-paused,
+the Play button is enabled but the tooltip said "Resume" — no hint that
+manual click overrides the scheduled auto-resume. Updated tooltip to
+`Resume now (or wait for auto-resume in 2h 15m)` so the user knows both
+options exist.
+
+## #6 — Preflight failure granularity
+
+`ui/src/components/Welcome.tsx:392`. "Not on PATH" was shown both when
+the CLI was absent and when the CLI was found but the auto-approve flag
+wasn't detected. Fixed by extracting `describeCliState()` which returns
+three distinct messages: probing → not installed → installed-but-old
+(with the specific flag name CCCPlayer needs).
+
+## #7 — Clickable artifact paths
+
+`ui/src/components/TerminalState.tsx:185`, `app/src-tauri/src/commands.rs:169`.
+Added a tiny `reveal_in_finder` Tauri command that shells `open -R`
+(or `open` for directories). Each artifact path on the session report
+is now a button with a hover-glow underline; click reveals in Finder.
+No new Tauri plugin dep — just std::process::Command.
+
+## #8 — Existing-PRD reuse banner
+
+`ui/src/components/Welcome.tsx:429`, `app/src-tauri/src/commands.rs:133`.
+Added a lightweight `peek_workdir_artifacts` command that returns
+`(has_prd, review_count)`. When non-empty, Welcome shows a cyan
+informational banner: "Reusing folder. Existing PRD.md + N reviews will
+be extended on the next round…" — so users coming from "New session
+(same folder)" know they're continuing, not starting fresh.
+
+## #9 — Parallel GoalCheck cancel early-exit
+
+`crates/harness/src/orchestrator.rs:311`. `tokio::join!` waited for BOTH
+turns' cancel ladders (SIGINT → SIGTERM → SIGKILL, up to ~10s each)
+before pause/stop could take effect. Wrapped the join in a
+`tokio::select!` against a 200ms cancel poller so the moment the cancel
+atomic flips, the futures are dropped and `kill_on_drop(true)` cleans
+up the child processes. Pause latency in GoalCheck went from O(10s)
+worst case to O(200ms).
+
+## Out of scope
+
+- **#2 token cost label**: CCCPlayer drives the *CLI*; users have
+  Claude / Codex *subscriptions*, not API-key billing. A "$X.XX so far"
+  label would mislead.
+- **Other "critical" findings from the agent reports**: verified as
+  false positives during manual review (capability schema missing
+  `fs:*` permissions — Rust `std::fs` doesn't go through the Tauri fs
+  plugin; cancel-polling task "leak" — bounded by 200ms after turn
+  ends; RoundProbe round-mismatch — design is intentional, reducer
+  matches latest probe).
+
+## Test evidence
+
+- `cargo test --workspace` — 117 tests pass (57 core + 55 harness +
+  5 e2e). The sandbox-only `login_shell_which_finds_ls` failure
+  pre-exists v1.7.4 and passes on macOS.
+- Three new regression tests in `crates/harness/src/parsers.rs` cover
+  the v1.7.5 JSON parser fix: `}` inside rationale string, `\"`
+  escape, skipping pre-JSON braces.
+- `npm run build` produces the React bundle; `npm run typecheck` clean.

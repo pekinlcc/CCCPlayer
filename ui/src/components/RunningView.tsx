@@ -61,6 +61,10 @@ export function RunningView(props: {
   const [nowTick, setNowTick] = useState(0)
   const [pausing, setPausing] = useState(false)
   const [stopping, setStopping] = useState(false)
+  // v1.7.5: Stop now asks for confirmation before abandoning. The modal
+  // surfaces what the user is about to lose (rounds, elapsed) so a stray
+  // click doesn't kill a multi-hour session. See AUDIT.md #3.
+  const [stopConfirm, setStopConfirm] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState>('RUNNING')
   // Latest goal-check snapshot per agent, powering the "Remaining to goal"
   // block. Updated whenever a goal_check event lands. See PRD §6.1 / §7.
@@ -329,7 +333,13 @@ export function RunningView(props: {
         <button
           type="button"
           className="tbtn play big"
-          title={canResume ? 'Resume' : 'Running'}
+          title={
+            canResume
+              ? retryAt
+                ? `Resume now (or wait for auto-resume ${formatCountdown(retryAt, nowTick)})`
+                : 'Resume'
+              : 'Running'
+          }
           disabled={!canResume}
           onClick={async () => {
             if (!canResume) return
@@ -366,15 +376,13 @@ export function RunningView(props: {
         <button
           type="button"
           className="tbtn stop"
-          title="Stop"
-          onClick={async () => {
+          title="Stop (asks to confirm)"
+          onClick={() => {
             if (isStopping) return
-            setStopping(true)
-            try {
-              await stopSession()
-            } catch {
-              setStopping(false)
-            }
+            // v1.7.5: don't kill the session on first click — surface a
+            // modal that shows what's about to be abandoned so a stray
+            // click on a multi-hour run is recoverable. See AUDIT.md #3.
+            setStopConfirm(true)
           }}
           disabled={isStopping}
         >
@@ -492,7 +500,85 @@ export function RunningView(props: {
         <span className="spacer" />
         <span className="live">● LIVE</span>
       </div>
+      {stopConfirm && (
+        <StopConfirmModal
+          round={round}
+          elapsed={elapsed}
+          claudeTokens={claudeTokens}
+          codexTokens={codexTokens}
+          onCancel={() => setStopConfirm(false)}
+          onConfirm={async () => {
+            setStopConfirm(false)
+            setStopping(true)
+            try {
+              await stopSession()
+            } catch {
+              setStopping(false)
+            }
+          }}
+        />
+      )}
     </Shell>
+  )
+}
+
+/**
+ * Confirmation modal for the Stop button (AUDIT.md #3). Stop is destructive
+ * — the session transitions to ABANDONED and the running CLIs are killed —
+ * but it's recoverable: every round writes a `round-NN.tar.zst` snapshot
+ * and `round-00.tar.zst` is the user's pristine starting state. The modal
+ * surfaces what the user is about to lose AND reminds them snapshots
+ * persist, so a stray click on a long session is undoable.
+ */
+function StopConfirmModal(props: {
+  round: number
+  elapsed: number
+  claudeTokens: number
+  codexTokens: number
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const totalTokens = props.claudeTokens + props.codexTokens
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal">
+        <div className="modal-title">Stop and abandon session?</div>
+        <div className="modal-body">
+          <p>
+            About to terminate the current session and mark it as{' '}
+            <code>ABANDONED</code>. The running Claude and Codex turns will be
+            cancelled mid-flight.
+          </p>
+          <div className="stop-stats">
+            <div className="stop-stat">
+              <span className="lbl">Round</span>
+              <span className="big">{String(props.round).padStart(2, '0')}</span>
+            </div>
+            <div className="stop-stat">
+              <span className="lbl">Elapsed</span>
+              <span className="big">{formatElapsed(props.elapsed)}</span>
+            </div>
+            <div className="stop-stat">
+              <span className="lbl">Tokens used</span>
+              <span className="big">{totalTokens.toLocaleString()}</span>
+            </div>
+          </div>
+          <p className="hint">
+            Snapshots in <code>.cccplayer/snapshots/</code> are preserved, so
+            you can rewind to any round (or the untouched <code>round-00</code>)
+            later if you change your mind.
+          </p>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="btn secondary" onClick={props.onCancel}>
+            Keep running
+          </button>
+          <button type="button" className="btn danger" onClick={props.onConfirm}>
+            Stop and abandon
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 

@@ -122,6 +122,38 @@ export async function stopSession(): Promise<void> {
   await fn<void>('stop_session')
 }
 
+/**
+ * v1.7.5 (AUDIT.md #7): reveal a workspace artifact in Finder. The Rust
+ * side runs `open -R <path>` for files (Finder pops up with the file
+ * highlighted) or `open <path>` for directories (Finder opens the
+ * folder). Falls back to a no-op outside Tauri so the dev-server build
+ * doesn't break.
+ */
+export async function revealInFinder(path: string): Promise<void> {
+  const fn = await invoke()
+  await fn<void>('reveal_in_finder', { path })
+}
+
+/**
+ * v1.7.5 (AUDIT.md #8): peek at a workdir's session artifacts so Welcome
+ * can warn the user that hitting Play will extend an existing PRD.md +
+ * review chain rather than starting fresh. Cheap — just a directory
+ * listing.
+ */
+export async function peekWorkdirArtifacts(
+  path: string,
+): Promise<{ has_prd: boolean; review_count: number }> {
+  const fn = await invoke()
+  try {
+    return await fn<{ has_prd: boolean; review_count: number }>(
+      'peek_workdir_artifacts',
+      { path },
+    )
+  } catch {
+    return { has_prd: false, review_count: 0 }
+  }
+}
+
 // Subscribe to `cccplayer://event` emissions from the orchestrator. Returns
 // an unsubscribe function. Falls back to a no-op when running outside Tauri.
 export async function subscribeEvents(

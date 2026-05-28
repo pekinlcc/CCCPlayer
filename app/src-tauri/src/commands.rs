@@ -129,3 +129,84 @@ pub async fn pause_session(state: State<'_, AppState>) -> Result<(), String> {
 pub async fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
     state.stop().await.map_err(|e| e.to_string())
 }
+
+/// v1.7.5 AUDIT.md #8: lightweight "what's already in this workdir" peek so
+/// the Welcome screen can warn the user that hitting Play will extend / mutate
+/// an existing PRD.md + review chain instead of starting fresh.
+///
+/// Returns `(has_prd, review_count)`. Both fields are independent — a workdir
+/// can have a PRD.md without reviews (PLANNING happened, IMPLEMENTING failed)
+/// or reviews without PRD (extremely unusual, but possible if the user moved
+/// PRD.md by hand).
+#[derive(Debug, Serialize, Default)]
+pub struct WorkdirArtifacts {
+    pub has_prd: bool,
+    pub review_count: u32,
+}
+
+#[tauri::command]
+pub fn peek_workdir_artifacts(path: String) -> Result<WorkdirArtifacts, String> {
+    let dir = PathBuf::from(&path);
+    if !dir.is_dir() {
+        return Ok(WorkdirArtifacts::default());
+    }
+    let mut out = WorkdirArtifacts::default();
+    let re = regex::Regex::new(r"^codex_review_v\d+\.md$").unwrap();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == "PRD.md" {
+            out.has_prd = true;
+        } else if re.is_match(name) {
+            out.review_count += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// v1.7.5 AUDIT.md #7: reveal an artifact path in Finder so users can stop
+/// copy-pasting `~/.cccplayer/events.log` into Terminal.
+///
+/// macOS `open -R <path>` opens a Finder window with the file/folder
+/// highlighted. For directories that don't exist (rare, e.g. a snapshot
+/// was rolled back), fall back to opening the parent.
+///
+/// This stays inside std::process::Command instead of pulling in
+/// tauri-plugin-shell / tauri-plugin-opener — we only need one command,
+/// one macOS-native tool, no URL handling.
+#[tauri::command]
+pub fn reveal_in_finder(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    let target = if p.exists() {
+        p
+    } else if let Some(parent) = p.parent().filter(|q| q.exists()) {
+        parent.to_path_buf()
+    } else {
+        return Err(format!("nothing to reveal at {path}"));
+    };
+    // `-R` reveals (highlights) the path in Finder rather than opening it.
+    // For a directory that's the workdir root, we drop -R so Finder shows
+    // the contents instead of the parent with the dir selected.
+    let output = if target.is_dir() {
+        std::process::Command::new("open")
+            .arg(&target)
+            .output()
+            .map_err(|e| format!("spawn open: {e}"))?
+    } else {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&target)
+            .output()
+            .map_err(|e| format!("spawn open: {e}"))?
+    };
+    if !output.status.success() {
+        return Err(format!(
+            "open exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}

@@ -35,6 +35,8 @@ fn main() {
                 crate::commands::start_session,
                 crate::commands::pause_session,
                 crate::commands::stop_session,
+                crate::commands::reveal_in_finder,
+                crate::commands::peek_workdir_artifacts,
             ])
             .on_window_event(|window, event| {
                 // PRD §6.4: closing the window hides it, never quits the

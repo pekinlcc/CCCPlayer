@@ -1,3 +1,4 @@
+import { revealInFinder } from '../api'
 import type { Event, SessionState, SessionSummary } from '../types'
 import { Meter, PauseIcon, PlayIcon, Shell, StopIcon } from './Shell'
 
@@ -138,20 +139,22 @@ export function TerminalState(props: {
         <div className="artifacts">
           <div className="artifacts-head">
             <span className="lbl">Artifacts</span>
+            <span className="dim">click to reveal in Finder</span>
           </div>
           <ul>
-            <li>
-              workspace: <code>{props.workdir}</code>
-            </li>
-            <li>
-              event log: <code>{props.workdir}/.cccplayer/events.log</code>
-            </li>
-            <li>
-              transcripts: <code>{props.workdir}/.cccplayer/transcripts/</code>
-            </li>
-            <li>
-              snapshots: <code>{props.workdir}/.cccplayer/snapshots/</code>
-            </li>
+            <ArtifactRow label="workspace" path={props.workdir} />
+            <ArtifactRow
+              label="event log"
+              path={`${props.workdir}/.cccplayer/events.log`}
+            />
+            <ArtifactRow
+              label="transcripts"
+              path={`${props.workdir}/.cccplayer/transcripts/`}
+            />
+            <ArtifactRow
+              label="snapshots"
+              path={`${props.workdir}/.cccplayer/snapshots/`}
+            />
           </ul>
         </div>
 
@@ -173,13 +176,37 @@ export function TerminalState(props: {
         <span>Workdir</span>
         <code>{props.workdir}</code>
         <span className="spacer" />
-        <span>v1.7.4</span>
+        <span>v1.7.5</span>
       </div>
     </Shell>
   )
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * v1.7.5 AUDIT.md #7: one row of the Artifacts list, with a click handler
+ * that reveals the path in Finder via the Rust `reveal_in_finder` command.
+ * Rendered as a button (not an <a>) because there's no URL semantics and
+ * keyboard/AT users get button behavior for free.
+ */
+function ArtifactRow(props: { label: string; path: string }) {
+  return (
+    <li>
+      <span className="art-label">{props.label}:</span>{' '}
+      <button
+        type="button"
+        className="art-path"
+        title={`Reveal ${props.path} in Finder`}
+        onClick={() => {
+          void revealInFinder(props.path)
+        }}
+      >
+        <code>{props.path}</code>
+      </button>
+    </li>
+  )
+}
 
 function FinalColumn(props: {
   agent: 'claude' | 'codex'

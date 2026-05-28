@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   classifyWorkdir,
   GoalConflictError,
+  peekWorkdirArtifacts,
   pickFolder,
   readGoalMd,
   runPreflight,
@@ -33,6 +34,17 @@ export function Welcome(props: {
    * modal will catch the mismatch).
    */
   const [autoLoadedGoal, setAutoLoadedGoal] = useState<string | null>(null)
+  /**
+   * v1.7.5 (AUDIT.md #8): when the chosen workdir already contains a
+   * `PRD.md` and/or `codex_review_v*.md` files, hitting Play won't start
+   * fresh — Claude will revise the existing PRD and Codex's next review
+   * will be `vN+1` on top of the old chain. Pre-show a banner so users
+   * coming back from a previous session know what to expect.
+   */
+  const [reuseInfo, setReuseInfo] = useState<{
+    hasPrd: boolean
+    reviewCount: number
+  } | null>(null)
   // Stale-closure guards — the workdir-driven effect reads current goal /
   // autoLoadedGoal without re-running when they change.
   const goalRef = useRef(goal)
@@ -48,10 +60,19 @@ export function Welcome(props: {
     const path = workdir.trim()
     if (!path) {
       setSafety(null)
+      setReuseInfo(null)
       return
     }
     const t = setTimeout(() => {
       void classifyWorkdir(path).then((r) => setSafety(r.verdict))
+      // v1.7.5: peek at PRD.md / codex_review_v*.md so the reuse banner
+      // can warn the user before they hit Play.
+      void peekWorkdirArtifacts(path).then((a) =>
+        setReuseInfo({
+          hasPrd: a.has_prd,
+          reviewCount: a.review_count,
+        }),
+      )
     }, 300)
     return () => clearTimeout(t)
   }, [workdir])
@@ -223,34 +244,30 @@ export function Welcome(props: {
           <PreflightRow
             label="Claude Code CLI"
             ok={claudeOk}
-            detail={
-              preflight?.claude
-                ? preflight.claude.version_line +
-                  (preflight.claude.auto_approve_flag
-                    ? ` · flag: ${preflight.claude.auto_approve_flag}`
-                    : '')
-                : preflight
-                ? 'Not on PATH. Install Claude Code CLI.'
-                : 'probing…'
-            }
+            detail={describeCliState(
+              'claude',
+              preflight?.claude ?? null,
+              preflight == null,
+            )}
           />
           <PreflightRow
             label="Codex CLI"
             ok={codexOk}
-            detail={
-              preflight?.codex
-                ? preflight.codex.version_line +
-                  (preflight.codex.auto_approve_flag
-                    ? ` · flag: ${preflight.codex.auto_approve_flag}`
-                    : '')
-                : preflight
-                ? 'Not on PATH. Install Codex CLI.'
-                : 'probing…'
-            }
+            detail={describeCliState(
+              'codex',
+              preflight?.codex ?? null,
+              preflight == null,
+            )}
           />
         </ul>
 
         {safety && <SafetyNotice verdict={safety} />}
+        {reuseInfo && (reuseInfo.hasPrd || reuseInfo.reviewCount > 0) && (
+          <ReuseBanner
+            hasPrd={reuseInfo.hasPrd}
+            reviewCount={reuseInfo.reviewCount}
+          />
+        )}
       </div>
 
       <div className="transport">
@@ -295,7 +312,7 @@ export function Welcome(props: {
         <span>Workdir</span>
         <code>{workdir.trim() || '—'}</code>
         <span className="spacer" />
-        <span>v1.7.4</span>
+        <span>v1.7.5</span>
       </div>
       {goalConflict && (
         <GoalConflictModal
@@ -368,6 +385,66 @@ function PreflightRow(props: { label: string; ok: boolean; detail: string }) {
       <span className="label">{props.label}</span>
       <span className="detail">{props.detail}</span>
     </li>
+  )
+}
+
+/**
+ * v1.7.5 AUDIT.md #6: surface the THREE preflight states distinctly so users
+ * fixing the wrong problem don't waste time.
+ *
+ * 1. Probing — preflight hasn't returned yet.
+ * 2. Not installed — CLI binary not found on PATH or any known
+ *    location (homebrew, ~/.local/bin, login-shell probe).
+ * 3. Installed but lacks auto-approve flag — binary found and `--version`
+ *    works, but `--help` doesn't advertise a `--dangerously-skip-permissions`-
+ *    class flag. Either CLI version is too old or too new (flag renamed).
+ *    User action: upgrade or downgrade the CLI, not reinstall.
+ * 4. OK — version line + which flag was detected.
+ */
+function describeCliState(
+  kind: 'claude' | 'codex',
+  info: import('../types').CliInfo | null,
+  stillProbing: boolean,
+): string {
+  if (stillProbing) return 'probing…'
+  if (!info) {
+    return kind === 'claude'
+      ? 'Not found on PATH. Install Claude Code CLI: `claude install` (see docs.anthropic.com).'
+      : 'Not found on PATH. Install Codex CLI: `npm i -g @openai/codex`.'
+  }
+  if (!info.supports_auto_approve) {
+    return (
+      `${info.version_line} · installed, but auto-approve flag not detected. ` +
+      `Upgrade the CLI — CCCPlayer needs ` +
+      (kind === 'claude'
+        ? '`--dangerously-skip-permissions`'
+        : '`--dangerously-bypass-approvals-and-sandbox`') +
+      ' to run unattended.'
+    )
+  }
+  return `${info.version_line} · flag: ${info.auto_approve_flag}`
+}
+
+/**
+ * v1.7.5 AUDIT.md #8: heads-up banner when the chosen workdir already has
+ * a `PRD.md` and/or `codex_review_v*.md` files. Starting a session here
+ * doesn't wipe them — Claude will revise the existing PRD in place and
+ * Codex's next review will be `v{N+1}` on top of the existing chain. For
+ * users who explicitly want "continue", that's exactly right. For users
+ * who think they're starting fresh, this banner is the warning.
+ */
+function ReuseBanner(props: { hasPrd: boolean; reviewCount: number }) {
+  const parts: string[] = []
+  if (props.hasPrd) parts.push('PRD.md')
+  if (props.reviewCount === 1) parts.push('1 review')
+  else if (props.reviewCount > 1) parts.push(`${props.reviewCount} reviews`)
+  return (
+    <div className="reuse-banner">
+      <strong>Reusing folder.</strong> Existing {parts.join(' + ')} will be
+      extended on the next round (PRD revised in place; next review will be
+      v{props.reviewCount + 1}). Snapshots in <code>.cccplayer/snapshots/</code>{' '}
+      preserve every prior round if you want to rewind later.
+    </div>
   )
 }
 

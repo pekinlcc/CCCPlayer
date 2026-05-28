@@ -10,8 +10,16 @@ use sha2::{Digest, Sha256};
 use crate::events::Event;
 use crate::session::{Session, SessionMeta, UsageTotals};
 
-/// Write `bytes` to `path` atomically: write to `path.tmp`, fsync, rename.
-/// See PRD §8 "关键文件落盘 fsync" and §16.5.
+/// Write `bytes` to `path` atomically: write tmp, fsync tmp, rename onto the
+/// final path, fsync the parent directory. See PRD §8 "关键文件落盘 fsync"
+/// and §16.5.
+///
+/// The parent-directory fsync is the v1.7.5 fix per AUDIT.md #4. POSIX
+/// requires it so that on power loss the new directory entry (pointing at
+/// the renamed file) is durable, not just the inode contents. macOS APFS
+/// is forgiving in practice but not specified to be — without this, a
+/// surprise reboot mid-session could roll `session.json` back to the
+/// pre-rename state on disk while the in-memory state was already past it.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -27,10 +35,16 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         let mut f = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(bytes)?;
-        f.sync_all()?; // fsync per §8
+        f.sync_all()?; // fsync the file inode + data
     }
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    // Fsync the parent directory so the new dir entry is durable. Best
+    // effort — fs implementations that don't need it (or don't permit it)
+    // shouldn't fail the whole write.
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 

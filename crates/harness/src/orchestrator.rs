@@ -310,9 +310,33 @@ impl Orchestrator {
             }
             Phase::GoalCheck => {
                 // Run both in parallel. §5/§7.
+                //
+                // v1.7.5 AUDIT.md #9: race the join against an external
+                // cancel-watcher so a user-requested Pause/Stop doesn't
+                // have to wait for BOTH turns to finish their SIGINT →
+                // SIGTERM → SIGKILL ladders. When cancel wins, we early-
+                // return; the futures get dropped, which triggers
+                // `kill_on_drop(true)` on both child processes, and the
+                // next step() iteration sees the cancel atomic and
+                // routes to PAUSED or ABANDONED. Without this, pause
+                // latency during GoalCheck was up to ~10s × 2.
                 let claude_fut = self.run_turn(Agent::Claude, Phase::GoalCheck, events_tx);
                 let codex_fut = self.run_turn(Agent::Codex, Phase::GoalCheck, events_tx);
-                let (claude_res, codex_res) = tokio::join!(claude_fut, codex_fut);
+                let cancel_atomic = self.cancel.clone();
+                let cancel_watcher = async move {
+                    loop {
+                        if cancel_atomic.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                };
+                let join_fut = async { tokio::join!(claude_fut, codex_fut) };
+                let (claude_res, codex_res) = tokio::select! {
+                    biased;
+                    () = cancel_watcher => return Ok(()),
+                    pair = join_fut => pair,
+                };
                 let (claude_res, claude_delta) = claude_res?;
                 let (codex_res, codex_delta) = codex_res?;
                 self.apply_usage_delta(Agent::Claude, claude_delta, events_tx);
