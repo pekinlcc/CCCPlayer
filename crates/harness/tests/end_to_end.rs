@@ -3,6 +3,7 @@
 //!
 //! This is the PRD §19 #3 "fake CLI test suite" in its minimum form.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,6 +11,27 @@ use cccplayer_core::session::Session;
 use cccplayer_core::state::SessionState;
 use cccplayer_harness::{Orchestrator, OrchestratorConfig};
 use tokio::sync::mpsc;
+
+/// Read the persisted session state WITHOUT re-acquiring the flock.
+///
+/// Earlier revisions reopened via `Session::open()` + `load_session_meta()`
+/// to assert the final state, but `Session::open` re-takes the exclusive
+/// `flock`. Even after `drop(orch)`, the just-released lock occasionally
+/// hadn't been observed as free by the immediate reopen under parallel test
+/// load — surfacing as flaky `another CCCPlayer instance is already using …
+/// (os error 11)` failures (~2/3 of parallel runs). Production never does
+/// this: `app_state.rs` reads `session.json` as raw JSON precisely to avoid
+/// re-locking. The tests now do the same, which is both flake-free and a
+/// truer mirror of production. See the v1.7.6 audit.
+fn read_session_state(workdir: &Path) -> SessionState {
+    let body = std::fs::read_to_string(workdir.join(".cccplayer/session.json"))
+        .expect("session.json should exist after a run");
+    let v: serde_json::Value =
+        serde_json::from_str(&body).expect("session.json should be valid JSON");
+    let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("");
+    serde_json::from_value(serde_json::Value::String(state.to_string()))
+        .unwrap_or_else(|_| panic!("unknown session state {state:?}"))
+}
 
 #[tokio::test]
 async fn full_loop_reaches_done() {
@@ -86,14 +108,11 @@ async fn full_loop_reaches_done() {
     );
 
     // Re-open the session and confirm state is DONE.
-    let session = Session::open(workdir.path()).expect("reopen");
-    let meta = cccplayer_core::persistence::load_session_meta(&session)
-        .unwrap()
-        .unwrap();
+    let state = read_session_state(workdir.path());
     assert!(
-        matches!(meta.state, SessionState::Done),
+        matches!(state, SessionState::Done),
         "expected DONE, got {:?}",
-        meta.state
+        state
     );
 }
 
@@ -145,14 +164,11 @@ async fn refining_loop_reaches_done() {
     assert!(workdir.path().join("codex_review_v1.md").exists());
     assert!(workdir.path().join("codex_review_v2.md").exists());
 
-    let session = Session::open(workdir.path()).expect("reopen");
-    let meta = cccplayer_core::persistence::load_session_meta(&session)
-        .unwrap()
-        .unwrap();
+    let state = read_session_state(workdir.path());
     assert!(
-        matches!(meta.state, SessionState::Done),
+        matches!(state, SessionState::Done),
         "expected DONE after refining, got {:?}",
-        meta.state
+        state
     );
 }
 
@@ -192,14 +208,11 @@ async fn missing_goal_causes_pause() {
     orch.run(tx).await.expect("run should not error, just pause");
     drop(orch);
 
-    let session = Session::open(workdir.path()).expect("reopen");
-    let meta = cccplayer_core::persistence::load_session_meta(&session)
-        .unwrap()
-        .unwrap();
+    let state = read_session_state(workdir.path());
     assert!(
-        matches!(meta.state, SessionState::Paused),
+        matches!(state, SessionState::Paused),
         "expected PAUSED after GOAL.md deletion, got {:?}",
-        meta.state
+        state
     );
 }
 
@@ -241,14 +254,11 @@ async fn external_stop_transitions_to_abandoned() {
     orch.run(tx).await.expect("run");
     drop(orch);
 
-    let session = Session::open(workdir.path()).expect("reopen");
-    let meta = cccplayer_core::persistence::load_session_meta(&session)
-        .unwrap()
-        .unwrap();
+    let state = read_session_state(workdir.path());
     assert!(
-        matches!(meta.state, SessionState::Abandoned),
+        matches!(state, SessionState::Abandoned),
         "expected ABANDONED after stop, got {:?}",
-        meta.state
+        state
     );
 }
 
@@ -285,8 +295,14 @@ async fn usage_is_tracked_per_session() {
     orch.run(tx).await.expect("run");
     drop(orch);
 
-    let session = Session::open(workdir.path()).expect("reopen");
-    let usage = cccplayer_core::persistence::load_usage(&session).unwrap();
+    // Read usage.json directly (flock-free) — same reasoning as
+    // read_session_state; reopening via Session::open re-locks and flakes
+    // under parallel load.
+    let usage: cccplayer_core::session::UsageTotals = {
+        let body = std::fs::read_to_string(workdir.path().join(".cccplayer/usage.json"))
+            .expect("usage.json should exist after a run");
+        serde_json::from_str(&body).expect("usage.json should be valid JSON")
+    };
     assert!(
         usage.claude_total() > 0,
         "claude usage should be > 0 after a session"

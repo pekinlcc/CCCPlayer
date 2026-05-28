@@ -176,7 +176,7 @@ export function TerminalState(props: {
         <span>Workdir</span>
         <code>{props.workdir}</code>
         <span className="spacer" />
-        <span>v1.7.5</span>
+        <span>v1.7.6</span>
       </div>
     </Shell>
   )
@@ -185,7 +185,7 @@ export function TerminalState(props: {
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 /**
- * v1.7.5 AUDIT.md #7: one row of the Artifacts list, with a click handler
+ * v1.7.6 AUDIT.md #7: one row of the Artifacts list, with a click handler
  * that reveals the path in Finder via the Rust `reveal_in_finder` command.
  * Rendered as a button (not an <a>) because there's no URL semantics and
  * keyboard/AT users get button behavior for free.

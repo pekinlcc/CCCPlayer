@@ -90,6 +90,36 @@ impl SessionMeta {
     }
 }
 
+/// Clamp a rate-limit auto-resume wait into `[min, max]`, handling the two
+/// pathological inputs that the raw `(retry_at - now)` delta can produce:
+///
+/// * **Past / negative** — the provider quoted a retry time already elapsed,
+///   or the local clock is skewed ahead. Without a floor this would resume
+///   immediately into a still-closed window and busy-loop. Clamped up to
+///   `min`.
+/// * **Far future** — a garbage timestamp (e.g. a hand-edited `session.json`
+///   with year 9999) would park the resume sleeper effectively forever.
+///   Clamped down to `max`; if the window genuinely hasn't cleared by then
+///   the next attempt re-rate-limits and re-schedules.
+///
+/// Returns the clamped [`std::time::Duration`] to sleep. Extracted to core
+/// (from the Tauri-gated `app_state::schedule_auto_resume`) so it's unit-
+/// testable without the desktop build. v1.7.6 (audit #3/#6).
+pub fn clamp_resume_wait(
+    retry_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    min: std::time::Duration,
+    max: std::time::Duration,
+) -> std::time::Duration {
+    match (retry_at - now).to_std() {
+        Ok(d) if d < min => min,
+        Ok(d) if d > max => max,
+        Ok(d) => d,
+        // Negative delta (retry_at <= now) — chrono's to_std() errors.
+        Err(_) => min,
+    }
+}
+
 /// Wraps the `.cccplayer/` directory for a Session. Owns the flock.
 pub struct Session {
     workdir: PathBuf,
@@ -215,5 +245,46 @@ impl Session {
             }
         }
         Ok(max + 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    const MIN: Duration = Duration::from_secs(60);
+    const MAX: Duration = Duration::from_secs(6 * 60 * 60);
+
+    #[test]
+    fn normal_future_wait_passes_through() {
+        let now = Utc::now();
+        let retry = now + chrono::Duration::seconds(900); // 15 min
+        let w = clamp_resume_wait(retry, now, MIN, MAX);
+        // ~900s, allow a little slack for the clock read between lines.
+        assert!(w.as_secs() >= 895 && w.as_secs() <= 900, "got {w:?}");
+    }
+
+    #[test]
+    fn past_retry_clamps_to_min_not_zero() {
+        let now = Utc::now();
+        let retry = now - chrono::Duration::seconds(120); // already elapsed
+        // Negative delta → to_std() errs → min. Prevents immediate-retry
+        // busy-loop against a still-closed window.
+        assert_eq!(clamp_resume_wait(retry, now, MIN, MAX), MIN);
+    }
+
+    #[test]
+    fn very_soon_retry_clamps_up_to_min() {
+        let now = Utc::now();
+        let retry = now + chrono::Duration::seconds(5);
+        assert_eq!(clamp_resume_wait(retry, now, MIN, MAX), MIN);
+    }
+
+    #[test]
+    fn far_future_retry_clamps_down_to_max() {
+        let now = Utc::now();
+        let retry = now + chrono::Duration::days(365 * 100); // year ~2125
+        assert_eq!(clamp_resume_wait(retry, now, MIN, MAX), MAX);
     }
 }

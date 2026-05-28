@@ -6,6 +6,7 @@
 //! mutations via commands that cross this boundary.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,8 +22,17 @@ use tokio::task::JoinHandle;
 use crate::commands::StartError;
 
 /// What Tauri's `manage()` keeps alive for us.
+#[derive(Clone)]
 pub struct AppState {
     pub running: Arc<Mutex<Option<RunningSession>>>,
+    /// Monotonic counter bumped on every `start()`. Each [`RunningSession`]
+    /// is stamped with the value it was created under. The rate-limit
+    /// auto-resume sleeper (see [`schedule_auto_resume`]) captures the
+    /// generation it was scheduled for and only fires if it still matches —
+    /// so a sleeper scheduled for session A can never resurrect a *different*
+    /// session B that happens to reuse the same workdir with a different
+    /// goal. v1.7.6 (audit #1).
+    pub generation: Arc<AtomicU64>,
 }
 
 /// One in-flight session.
@@ -30,12 +40,15 @@ pub struct RunningSession {
     pub workdir: PathBuf,
     pub handle: JoinHandle<Result<()>>,
     pub cancel: CancelHandle,
+    /// The `AppState::generation` value at the moment this session started.
+    pub generation: u64,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             running: Arc::new(Mutex::new(None)),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -121,6 +134,11 @@ impl AppState {
             }
         });
 
+        // Claim a fresh generation for this session. The auto-resume sleeper
+        // captures it and refuses to fire if a newer session has since taken
+        // over the slot. v1.7.6 (audit #1).
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+
         // Spawn the orchestrator. When it returns (because the session
         // paused / errored / finished), check the persisted session meta
         // for a rate-limit retry_at; if one is recorded, schedule an
@@ -129,6 +147,7 @@ impl AppState {
         let goal_for_wait = goal.clone();
         let app_for_wait = app.clone();
         let running_for_wait = self.running.clone();
+        let generation_for_wait = self.generation.clone();
         let handle = tokio::spawn(async move {
             let result = orch.run(events_tx).await;
             // Inspect the session meta on disk to see whether we paused
@@ -147,6 +166,8 @@ impl AppState {
                             schedule_auto_resume(
                                 app_for_wait,
                                 running_for_wait,
+                                generation_for_wait,
+                                generation,
                                 workdir_for_wait,
                                 goal_for_wait,
                                 retry_at_str,
@@ -161,6 +182,7 @@ impl AppState {
             workdir,
             handle,
             cancel,
+            generation,
         });
         Ok(())
     }
@@ -190,13 +212,27 @@ impl Default for AppState {
     }
 }
 
+/// Lower bound on how soon we'll auto-resume. A provider that reports a
+/// retry time already in the past (or one our skewed clock reads as past)
+/// shouldn't trigger an immediate-retry busy-loop against a still-closed
+/// window. v1.7.6 (audit #3).
+const AUTO_RESUME_MIN_WAIT: Duration = Duration::from_secs(60);
+/// Upper bound. A garbage / far-future retry timestamp (e.g. a hand-edited
+/// session.json with year 9999) shouldn't park the sleeper effectively
+/// forever. Cap at 6h; if the window genuinely hasn't cleared by then the
+/// next attempt re-rate-limits and re-schedules. v1.7.6 (audit #6).
+const AUTO_RESUME_MAX_WAIT: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// Schedule a tokio task that wakes at `retry_at_rfc3339` and re-invokes
 /// `AppState::start` with the recorded (workdir, goal). If the user has
 /// stopped or started a different session in the meantime we bail out.
-/// Added v1.3 for rate-limit self-healing.
+/// Added v1.3 for rate-limit self-healing; generation-pinned in v1.7.6.
+#[allow(clippy::too_many_arguments)]
 fn schedule_auto_resume(
     app: AppHandle,
     running: Arc<Mutex<Option<RunningSession>>>,
+    generation_counter: Arc<AtomicU64>,
+    scheduled_generation: u64,
     workdir: PathBuf,
     goal: String,
     retry_at_rfc3339: String,
@@ -209,27 +245,55 @@ fn schedule_auto_resume(
     };
     let retry_at_utc = retry_at.with_timezone(&chrono::Utc);
     let now = chrono::Utc::now();
-    let wait = (retry_at_utc - now).to_std().unwrap_or(Duration::from_secs(60));
+    // Clamp into [MIN, MAX] via the unit-tested core helper, then log when
+    // the clamp actually fired so a clock-skew (past) or garbage (far-future)
+    // retry_at is diagnosable rather than silent. v1.7.6 (audit #3/#6).
+    let wait = cccplayer_core::session::clamp_resume_wait(
+        retry_at_utc,
+        now,
+        AUTO_RESUME_MIN_WAIT,
+        AUTO_RESUME_MAX_WAIT,
+    );
+    if wait == AUTO_RESUME_MIN_WAIT && retry_at_utc - now < chrono::Duration::seconds(60) {
+        tracing::warn!(
+            "auto-resume: retry_at {retry_at_rfc3339} is past/very-soon; \
+             clamped up to {AUTO_RESUME_MIN_WAIT:?}"
+        );
+    } else if wait == AUTO_RESUME_MAX_WAIT {
+        tracing::warn!(
+            "auto-resume: retry_at {retry_at_rfc3339} is far in the future; \
+             capped to {AUTO_RESUME_MAX_WAIT:?}"
+        );
+    }
     tracing::info!(
-        "auto-resume scheduled in {:?} (at {retry_at_rfc3339})",
+        "auto-resume scheduled in {:?} (at {retry_at_rfc3339}, gen {scheduled_generation})",
         wait
     );
     tokio::spawn(async move {
         tokio::time::sleep(wait).await;
         // Confirm the guard still points at the same paused session we
-        // scheduled for. If user already resumed / stopped / started
-        // somewhere else, don't interfere.
+        // scheduled for. The generation check is the authoritative guard:
+        // any newer start() (manual resume, a different workdir, or a fresh
+        // session reusing this workdir with a different goal) bumps the
+        // generation, so a stale sleeper silently no-ops. The workdir +
+        // is_finished checks are belt-and-suspenders. v1.7.6 (audit #1).
         {
             let guard = running.lock().await;
             match guard.as_ref() {
                 Some(rs)
-                    if rs.workdir == workdir && rs.handle.is_finished() =>
+                    if rs.generation == scheduled_generation
+                        && rs.workdir == workdir
+                        && rs.handle.is_finished() =>
                 {
-                    tracing::info!("auto-resume: firing Start on {:?}", workdir);
+                    tracing::info!(
+                        "auto-resume: firing Start on {:?} (gen {scheduled_generation})",
+                        workdir
+                    );
                 }
                 _ => {
                     tracing::info!(
-                        "auto-resume: guard moved on, skipping scheduled fire"
+                        "auto-resume: session moved on (gen {scheduled_generation} stale), \
+                         skipping scheduled fire"
                     );
                     return;
                 }
@@ -243,7 +307,10 @@ fn schedule_auto_resume(
                 return;
             }
         };
-        let state = AppState { running };
+        let state = AppState {
+            running,
+            generation: generation_counter,
+        };
         // overwrite_goal=true is safe here: rate-limit auto-resume on an
         // already-initialized session means GOAL.md is whatever the agent
         // has been running against; content should match, the write is a

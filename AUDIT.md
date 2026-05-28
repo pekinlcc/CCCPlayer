@@ -208,3 +208,78 @@ worst case to O(200ms).
   the v1.7.5 JSON parser fix: `}` inside rationale string, `\"`
   escape, skipping pre-JSON braces.
 - `npm run build` produces the React bundle; `npm run typecheck` clean.
+
+---
+
+# v1.7.6 audit pass — rate-limit/auto-resume concurrency + CI flake
+
+A second deep audit (Explore agent + manual verification) focused on the
+rate-limit auto-resume subsystem — the riskiest area because it spawns
+detached tokio tasks that re-invoke session start at a future time. Three
+real issues fixed; several agent-flagged "criticals" verified to be
+non-issues (documented below so they don't get re-raised).
+
+## Fixed
+
+### A1 — Auto-resume could resurrect a different session's goal
+`app/src-tauri/src/app_state.rs`. The sleeper that fires `start()` after a
+rate-limit guarded only on `rs.workdir == workdir && rs.handle.is_finished()`.
+Narrow but real failure: stop session A on `/proj`, start session B on the
+same `/proj` with a *different* goal, let B finish — when A's sleeper wakes
+it would call `start(workdir, A_goal, overwrite_goal=true)`, clobbering B's
+`GOAL.md`. Fixed with a monotonic **session generation** counter on
+`AppState`: every `start()` claims a fresh generation, each `RunningSession`
+is stamped with it, and the sleeper only fires if the current session's
+generation still equals the one it was scheduled under. Any newer session
+(manual resume, different workdir, or same workdir + new goal) bumps the
+generation and the stale sleeper silently no-ops.
+
+### A3/A6 — retry_at past/garbage handling
+`app/src-tauri/src/app_state.rs` + `crates/core/src/session.rs`. The wait
+was `(retry_at - now).to_std().unwrap_or(60s)`. A past `retry_at` (provider
+quoted an elapsed time, or local clock skewed ahead) silently fell back to
+60s — fine, but undiagnosable — and a far-future garbage timestamp (e.g.
+hand-edited `session.json` with year 9999) would park the sleeper nearly
+forever. Extracted `clamp_resume_wait(retry_at, now, min, max)` into core
+(unit-tested, 4 cases) clamping into `[60s, 6h]`, and the caller now logs
+when either bound fires. Core helper is testable without the Tauri build.
+
+### A-flake — CI-breaking parallel-test flake
+`crates/harness/tests/end_to_end.rs`. The e2e tests reopened the session
+via `Session::open()` after `drop(orch)` to assert the final state — but
+`Session::open` re-takes the exclusive `flock`, and under parallel load the
+just-dropped lock occasionally wasn't observed free by the immediate
+reopen, failing ~2/3 of parallel runs with `another CCCPlayer instance is
+already using … (os error 11)`. Since CI runs `cargo test --workspace`
+in parallel, this would have intermittently broken the release pipeline.
+Fixed by reading `session.json` / `usage.json` as raw JSON (flock-free) —
+exactly what production `app_state.rs` already does and for the same
+reason. 10/10 parallel runs green after the fix.
+
+## Verified NOT a bug (agent over-flagged)
+
+- **"Orphan JoinHandle on workdir switch"** — can't happen. `start()`'s
+  top guard hard-errors on a *different* workdir ("another session is
+  already active") and returns idempotently for a still-running *same*
+  workdir; the only path that replaces a `RunningSession` is when the old
+  handle is already finished. No running task is ever silently dropped.
+- **"Stacking auto-resume tasks / thundering herd"** — sequential, not
+  stacking. The scheduler runs inside the session's handle task and fires
+  exactly once after `run()` returns; each resume spawns a fresh session
+  whose own handle schedules the next. At most one sleeper per generation.
+- **"Mutex held across .await serializes start"** — it's `tokio::Mutex`
+  (async-aware, legal); the only effect is brief serialization of
+  concurrent `start()` calls, which the single-active-session model makes
+  a non-issue in practice.
+
+## Test evidence
+
+- `cargo test --workspace` — 122 pass (61 core + 56 harness + 5 e2e),
+  parallel, 10/10 stable. Only the sandbox-only `login_shell_which_finds_ls`
+  is skipped (passes on macOS).
+- 4 new `session::tests::*` cases cover `clamp_resume_wait` (normal,
+  past→min, very-soon→min, far-future→max).
+- `npm run build` + `npm run typecheck` clean.
+- The Tauri-gated `app_state.rs` changes type-check in CI (macos-14);
+  they cannot compile in the Linux sandbox (GTK `gdk-sys` native dep),
+  so the riskiest arithmetic was extracted to core and unit-tested here.

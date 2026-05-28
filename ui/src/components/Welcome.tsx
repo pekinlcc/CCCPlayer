@@ -35,7 +35,7 @@ export function Welcome(props: {
    */
   const [autoLoadedGoal, setAutoLoadedGoal] = useState<string | null>(null)
   /**
-   * v1.7.5 (AUDIT.md #8): when the chosen workdir already contains a
+   * v1.7.6 (AUDIT.md #8): when the chosen workdir already contains a
    * `PRD.md` and/or `codex_review_v*.md` files, hitting Play won't start
    * fresh — Claude will revise the existing PRD and Codex's next review
    * will be `vN+1` on top of the old chain. Pre-show a banner so users
@@ -65,7 +65,7 @@ export function Welcome(props: {
     }
     const t = setTimeout(() => {
       void classifyWorkdir(path).then((r) => setSafety(r.verdict))
-      // v1.7.5: peek at PRD.md / codex_review_v*.md so the reuse banner
+      // v1.7.6: peek at PRD.md / codex_review_v*.md so the reuse banner
       // can warn the user before they hit Play.
       void peekWorkdirArtifacts(path).then((a) =>
         setReuseInfo({
@@ -312,7 +312,7 @@ export function Welcome(props: {
         <span>Workdir</span>
         <code>{workdir.trim() || '—'}</code>
         <span className="spacer" />
-        <span>v1.7.5</span>
+        <span>v1.7.6</span>
       </div>
       {goalConflict && (
         <GoalConflictModal
@@ -389,7 +389,7 @@ function PreflightRow(props: { label: string; ok: boolean; detail: string }) {
 }
 
 /**
- * v1.7.5 AUDIT.md #6: surface the THREE preflight states distinctly so users
+ * v1.7.6 AUDIT.md #6: surface the THREE preflight states distinctly so users
  * fixing the wrong problem don't waste time.
  *
  * 1. Probing — preflight hasn't returned yet.
@@ -426,7 +426,7 @@ function describeCliState(
 }
 
 /**
- * v1.7.5 AUDIT.md #8: heads-up banner when the chosen workdir already has
+ * v1.7.6 AUDIT.md #8: heads-up banner when the chosen workdir already has
  * a `PRD.md` and/or `codex_review_v*.md` files. Starting a session here
  * doesn't wipe them — Claude will revise the existing PRD in place and
  * Codex's next review will be `v{N+1}` on top of the existing chain. For

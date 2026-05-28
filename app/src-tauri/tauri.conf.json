@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "CCCPlayer",
-  "version": "1.7.5",
+  "version": "1.7.6",
   "identifier": "com.cccplayer.app",
   "build": {
     "beforeDevCommand": "npm --prefix ../ui run dev",
