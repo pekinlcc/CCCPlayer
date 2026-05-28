@@ -1,5 +1,103 @@
 # CCCPlayer Release Notes
 
+## v1.7.5 · 2026-05-28
+
+AUDIT pass on the v1.7.4 codebase: two real correctness bugs in the
+core + harness and a batch of UX polish in the running / paused /
+done states. Acts on 7 of 9 audit items; #2 (token cost label)
+intentionally skipped because CCCPlayer drives the subscription CLIs,
+not API-key billing. Full per-item rationale in `AUDIT.md`'s new
+"v1.7.5 audit pass" section.
+
+### Fixed — `extract_json_block` could truncate goal-check on `}` inside a string
+
+`crates/harness/src/parsers.rs::extract_json_block` did brace-depth
+counting that was not aware of JSON string literals. The moment any
+`rationale` / `missing` string contained a literal `}` (very common
+when the agent quoted a code fragment in its own rationale), the
+counter would drop to zero mid-string, the parser would emit a
+truncated slice, `serde_json` would refuse it, the turn would land as
+`output_malformed`, and after the §16.3 single retry the session
+would end as `ERRORED`.
+
+The string-aware tracker now tracks `"` enter/exit + `\"` escapes
+explicitly. Three new regression tests:
+
+- `}` inside a `rationale` string,
+- `\"` inside a quoted JSON string,
+- pre-JSON code-sample braces (e.g. agent prose with `function foo() {`)
+  no longer cause the parser to anchor on the sample instead of the
+  goal-check JSON.
+
+### Fixed — `atomic_write` was missing the parent-dir fsync after rename
+
+`crates/core/src/persistence.rs::atomic_write` already `sync_all`'d
+the temp file before `rename`, but per POSIX a `rename` itself is
+not durable until the parent directory's directory entry is fsynced.
+On APFS the visible behaviour is forgiving but the spec doesn't
+guarantee it; on a power-loss the directory entry could roll back to
+the pre-rename state on disk while the in-memory reducer state had
+already moved past it.
+
+Added a best-effort parent-directory fsync after `rename`. The
+fsync is best-effort (some platforms' dir fsync is a no-op) so we
+don't fail the write if the OS rejects it.
+
+### Fixed — pause during parallel GoalCheck waited for both turns to unwind
+
+`crates/harness/src/orchestrator.rs` ran the two GoalCheck turns
+under `tokio::join!`. A user-initiated Pause / Stop fired the cancel
+signal, but `join!` still waited for **both** turns' SIGINT → SIGTERM
+→ SIGKILL ladders before returning — so the visible pause latency
+in GoalCheck was as bad as 10 seconds.
+
+Wrapped the join in `tokio::select!` against a 200 ms cancel poller.
+The moment cancel fires, both futures are dropped, `kill_on_drop(true)`
+on the child handles cleans up, and the reducer sees the pause
+within ~200 ms. Pause latency in GoalCheck went from O(10 s) worst
+case to O(200 ms).
+
+### Changed — UX polish across Stop / Resume / Preflight / Session report / Welcome
+
+- **Stop button now opens a confirmation modal.** Shows what's about
+  to be abandoned (round, elapsed, tokens) plus a reminder that
+  `round-00.tar.zst` and per-round snapshots remain rewindable.
+  Single accidental clicks no longer cost a long session.
+- **PAUSED Resume button: tooltip now exposes the auto-resume window.**
+  Hovering Resume on a rate-limit-paused session shows "Resume now
+  (or wait for auto-resume in 2h 15m)". Manual override is no
+  longer hidden behind a guess about whether clicking will work.
+- **Preflight: three distinct failure states.** Instead of one
+  "not on PATH" message for two different failure modes:
+  *probing → not installed → installed-but-old*. The
+  "installed-but-old" path names the specific flag CCCPlayer needs
+  (`--output-format stream-json` for Claude, `codex exec` for Codex)
+  so users upgrade the right thing.
+- **Session-report artifact paths are now clickable.** Each path on
+  the DONE / STOPPED / ERRORED screen is a button that reveals the
+  file or folder in Finder via a new `reveal_in_finder` Tauri
+  command (shells `open -R`, no new plugin dep).
+- **Welcome "reuse banner" surfaces existing artifacts.** When the
+  chosen workdir already has `PRD.md` or `codex_review_v*.md` files,
+  Welcome shows a cyan informational banner explaining that the
+  next round will extend, not replace, the existing artifacts.
+  Backed by a new `peek_workdir_artifacts` Tauri command. Stops
+  users coming from "New session (same folder)" from being surprised.
+
+### Tests
+
+- `cargo test --workspace` — 117 pass (57 core + 55 harness + 5 e2e).
+- `npm run build` + typecheck — clean.
+
+### Not in this release
+
+- AUDIT item #2 (per-turn token-cost label) — intentionally out of
+  scope. CCCPlayer drives the subscription CLIs (Claude Code Max /
+  Codex), not API-key billing, so a "$X.XX this round" figure would
+  always be misleading.
+
+---
+
 ## v1.7.4 · 2026-04-21
 
 Companion fix to v1.7.3. `is_auth_failure` had the same over-broad

@@ -11,7 +11,7 @@
 ---
 
 - [English](#english) · [中文说明](#中文说明)
-- **Download / 下载**：[`dist/`](https://github.com/pekinlcc/CCCPlayer/tree/claude/macos-claude-code-client-Fhm6A/dist)
+- **Download / 下载**：[`dist/`](https://github.com/pekinlcc/CCCPlayer/tree/main/dist) · [GitHub Releases](https://github.com/pekinlcc/CCCPlayer/releases)
 - **Source / 源码**：[github.com/pekinlcc/CCCPlayer](https://github.com/pekinlcc/CCCPlayer)
 
 ---
