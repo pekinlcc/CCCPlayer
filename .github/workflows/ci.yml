@@ -1,0 +1,78 @@
+name: CI
+
+# Runs on every push to main and on PRs against main. Keeps the workspace
+# honest: Rust tests, frontend typecheck + bundle, and a quick smoke that
+# the integration tests still drive the fake CLIs end-to-end.
+#
+# Intentionally does NOT run the full macOS bundle build here — that lives
+# in `release.yml` and only runs on tag pushes, because the Tauri macOS
+# build is slow (~10–15 min) and burns Apple Silicon runner minutes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight CI runs when a new commit lands on the same branch so we
+# don't pile up minutes on every push during a flurry.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust workspace (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      # The end-to-end integration tests spawn the fake CLI binaries from
+      # `target/debug/`. Cargo's normal `cargo test --workspace` doesn't
+      # build other-package binaries as a side-effect, so we materialise
+      # them explicitly first. Otherwise the e2e tests fail with
+      # "fake-claude binary not built".
+      - name: Build fake CLI binaries
+        run: |
+          cargo build \
+            --bin cccplayer-fake-claude \
+            --bin cccplayer-fake-codex
+
+      # Skip `login_shell_which_finds_ls` — it requires an interactive
+      # login shell (`$SHELL -l -i -c 'command -v ls'`) which the GH
+      # ubuntu runner does not provide. The test passes on real macOS,
+      # which is the only platform that actually runs that codepath in
+      # production (Finder-launched .app bundles).
+      - name: cargo test --workspace
+        run: cargo test --workspace -- --skip login_shell_which_finds_ls
+
+  ui:
+    name: UI bundle (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI deps
+        working-directory: ui
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: ui
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: ui
+        run: npm run build
